@@ -224,8 +224,8 @@ for (const r of REGIONS.filter((x) => x.role === "reference")) {
 }
 
 console.log(`\ncrops to look at (feature is small; judge it at its own scale, not in an 800 px view):`);
-console.log(`  node tools/pngcrop.mjs ${files[0]} ${band.box.join(" ")} 3 /tmp/band-default.png`);
-console.log(`  node tools/pngcrop.mjs ${files[1]} ${band.box.join(" ")} 3 /tmp/band-control.png`);
+console.log(`  node tools/pngcrop.mjs ${files[0]} /tmp/band-default.png ${band.box.join(" ")} 3`);
+console.log(`  node tools/pngcrop.mjs ${files[1]} /tmp/band-control.png ${band.box.join(" ")} 3`);
 
 const verdict = present && lane;
 console.log(`\nVERDICT: ${verdict ? "PASS" : "FAIL"}  (presence ${present ? "ok" : "FAILED"}, lane ${lane ? "ok" : "FAILED"})`);

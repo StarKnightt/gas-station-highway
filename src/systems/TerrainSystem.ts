@@ -71,6 +71,23 @@ const TFORCE_TOKENS = [
    * this arm changes is placement and nothing is a count effect.
    */
   "noopendirt",
+  /**
+   * Near-field detail relief off. The forced-off control for the detail layer,
+   * and a strict one: the feature is guarded by `uNearGain > 0.0` rather than
+   * scaled by it, so this arm does not execute the branch and must render the
+   * previous frame exactly. Anything that moves outside the fade range in this
+   * comparison is a bug, not a tuning difference.
+   */
+  "nonear",
+  /**
+   * Near-field detail at gain 0.35 instead of 0.55. The arm for the judgement
+   * the gain actually is: `mix(base, detail, w)` does not add detail, it trades
+   * base for detail, so a higher gain buys clod structure by spending the
+   * large-scale blob variation the base normal carries. Both ends of that trade
+   * have to be measured, because mean|Laplacian| rises monotonically as the
+   * blobs are destroyed and would happily recommend 1.0.
+   */
+  "lowgain",
   /** antiTile off everywhere: the control for the tiling measurement. */
   "notile",
   /** Flat albedo and flat roughness, so only the normal map draws. */
@@ -753,6 +770,21 @@ export class TerrainSystem implements GameSystem {
       directSpec: 0.4,
       antiTile: TF.notile ? 0 : 0.85,
       normalFade: !TF.nofade,
+      /**
+       * Near-field relief. Only this material gets it: the road and forecourt
+       * asphalt already measure mean|Laplacian| 8.01 and 5.55 in the near field
+       * against this surface's 1.47, so they are not short of detail and
+       * sharpening them would be a change with no defect behind it.
+       *
+       * The range starts at 3.5 m because the closest ground the spawn camera
+       * can see is 4.2 m, so the fade is already past its knee everywhere it is
+       * visible — full strength would only ever apply off-screen. It ends at
+       * 8.5 m, where the branch stops executing and the far field becomes
+       * bit-identical rather than nearly so.
+       */
+      nearDetail: TF.nonear ? 0 : TF.lowgain ? 0.35 : 0.55,
+      nearScale: 3,
+      nearRange: [3.5, 8.5],
       soil: {
         ...soilCommon,
         altMap: dirtFineMaps.map,

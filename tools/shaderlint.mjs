@@ -418,6 +418,43 @@ for (const [modeLabel, modeReduced] of MODES) {
       console.log(`ok    antiTile does not reach the emitted source in ${label} mode (uniform value only)`);
     }
   }
+
+  /**
+   * The same test for the near-field detail arm, and it is the whole basis of
+   * that feature's "costs no program" claim.
+   *
+   * The arm is deliberately built from uniforms rather than build flags so the
+   * emitted source cannot vary with it. If someone later makes it conditional —
+   * to save three uniform uploads, which would be a poor trade — the key would
+   * silently stop distinguishing two different shaders and the failure mode is
+   * the wrong-program one: no link error, no warning, a plausible frame.
+   *
+   * All three parameters are checked, not just the gain. A scale or a range
+   * baked into the source as a literal would be just as unsound as a flag, and
+   * that is the more tempting mistake because it looks like a constant fold.
+   */
+  const nearBase = { ...cases[1].opts, nearDetail: 0.55, nearScale: 3, nearRange: [3.5, 8.5] };
+  const variants = [
+    ["gain", { ...nearBase, nearDetail: 0 }],
+    ["scale", { ...nearBase, nearScale: 7 }],
+    ["range", { ...nearBase, nearRange: [1, 40] }],
+  ];
+  for (const [label, base] of [["default", {}], ["reduced", { reduced: true }]]) {
+    const on = hi({ ...nearBase, ...base });
+    for (const [what, opts] of variants) {
+      const other = hi({ ...opts, ...base });
+      if (on !== other) {
+        fail++;
+        let i = 0;
+        while (i < on.length && i < other.length && on[i] === other[i]) i++;
+        console.log(`FAIL  nearDetail ${what} CHANGES the emitted source in ${label} mode — it must be a uniform`);
+        console.log(`        diverges at char ${i}: ${JSON.stringify(on.slice(i, i + 80))}`);
+        console.log(`                     versus  ${JSON.stringify(other.slice(i, i + 80))}`);
+      } else {
+        console.log(`ok    nearDetail ${what} does not reach the emitted source in ${label} mode`);
+      }
+    }
+  }
 }
 
 process.exit(fail ? 1 : 0);

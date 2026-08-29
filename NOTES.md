@@ -11013,3 +11013,138 @@ prose about `taskkill /PID <pid> /T /F` truncated mid-sentence and appended a
 half-written section, which is the **fourth** occurrence of prose about code
 carrying characters the surrounding language reserves. Write documentation with
 a file-writing tool, not by piping text through a shell.
+
+## A statistic that cannot discriminate between the hypotheses in play is not evidence
+
+I claimed a surface was asphalt because its p50 luma was 29 and the forecourt
+asphalt's was 28. The two hypotheses in play were "warm dirt" and "grey asphalt",
+and **luma is precisely the quantity that cannot separate warm dirt from grey
+asphalt at equal brightness.** One line of chroma settled it the other way: the
+band measures R-B 18.8 against dirt at 19.0 and road asphalt at -2.4.
+
+The part worth keeping is why it survived. **I had an 8x crop and the chroma
+available when I made the claim and used neither, because the luma number agreed
+with the story I already had.** A close match on an uninformative statistic feels
+like confirmation and carries none, and it is more dangerous than no evidence
+because it ends the enquiry.
+
+The test before quoting a number: **name the two hypotheses, then ask whether
+this statistic would differ between them.** If it would not, it is not evidence
+however closely it matches. Brightness cannot identify a material, a triangle
+count cannot identify draw cost, and an amplitude cannot identify a wavelength —
+all three have produced a confident wrong answer on this project.
+
+## An identity claim needs a noise floor before it needs a threshold
+
+I predicted that a distance-guarded feature would leave the far field
+bit-identical, and set the acceptance threshold at exactly zero changed pixels.
+The measurement came back at 0.208% with a largest delta of 165 and the judge
+failed the round.
+
+The feature was not leaking. **The renderer is not bit-reproducible across page
+loads** — wind-animated foliage moves, its shadows move with it, and even the sky
+shifted by 5 levels, which no change to a ground material's normal can cause. The
+threshold was unachievable by anything, so the test could only ever fail.
+
+**A zero-difference threshold is a claim about the instrument as much as about
+the code, and it needs its own control**: capture the same arm twice and measure
+what "nothing changed" actually looks like. That noise floor is as necessary as
+the forced-off arm. The forced-off arm establishes what the feature does; the
+identical pair establishes what not-doing-anything looks like, and without it a
+null result and a broken test are the same number.
+
+The evidence still pointed the right way — the large deltas were all on foliage,
+and the quietest ground in the frame was the one surface with nothing growing
+above it — but that was inference standing where a control should be. So the
+control was run: a bundle with two byte-identical arms.
+
+**The floor is not zero and it is not even stable.** Over rows 0-599, three
+pairs in which a far-field change was impossible by construction measured
+0.025%, 0.078% and 0.082% changed, with peak deltas of 159, 159 and 164 — against
+the feature run's 0.208% and 165. On the strictest any-delta form the identical
+pair reaches 0.92%. The count varies by an order of magnitude between pairs where
+nothing differs at all, because it is driven by which phase the wind was on when
+the frame was grabbed. **The peak delta, by contrast, is flat across every pair
+including the identical one**, which is what makes it the usable statistic.
+
+Two things this changes about how the claim should have been written. The
+whole-frame pixel count was retired as a gate and kept only as context printed
+beside its measured floor, because a number whose floor moves 8x cannot carry a
+threshold. And the surfaces that *are* deterministic — Film's band measures
+0.00% between identical builds, so the ground reproduces exactly even though the
+frame does not — became the place the identity claim is actually tested.
+
+**Even those needed their floor measured rather than assumed.** Setting the
+reference tolerance to zero because zero is the tidy number would have repeated
+the original error one level down: one reference box came out at peak 0 between
+identical builds and the other at peak 2. The tolerance is 2 because 2 is what
+was measured, and it is not permissive — a guard genuinely reaching past the fade
+produces the mean|d| 12.6 the band shows, six times that.
+
+**Cross-reference: Vegetation reached the same wall this afternoon from the plant
+side and settled on peak-delta over pixel-count for exactly this reason.** Two
+independent discoveries of one fact about this renderer, and they should be read
+as one finding. Anyone writing an identity gate here should start from
+peak-delta against a measured floor, not from a pixel count against zero.
+
+## An instrument that reports a fault on an impossible case is finished, not tunable
+
+Chasing the floor above, I built a tool on what still looks like a good idea:
+two captures of one build partition the frame into pixels that reproduce and
+pixels that do not, so mask to the first set and a zero threshold becomes honest.
+Its selftest passed, including a planted leak it correctly caught and a planted
+animated-only change it correctly ignored.
+
+Then I ran it on two byte-identical builds, where a leak is impossible, and it
+reported a leak: 0.92% of the deterministic set, peak 159. **A mask built from
+two samples cannot identify a pixel that flickers, because a flickering pixel has
+a fair chance of agreeing across any two draws** and then disagreeing with a
+third. The partition was the whole idea and the partition does not work at two
+samples.
+
+I deleted it rather than raise its threshold. **A tool that fires on a case where
+the fault cannot exist has no working range to tune into** — every number it
+produces afterwards has to be argued away, and the arguing is where the next
+wrong answer comes from. This project has now found four instruments whose
+result was predetermined by construction; this is the first one caught by being
+run on an impossibility rather than by someone noticing later.
+
+The general habit that caught it: **run a new instrument on the case where the
+answer is known to be "nothing" before running it on the case you care about.**
+The selftest checked that it could detect a fault. It never checked that it could
+report the absence of one.
+
+## A one-sided statistic will happily recommend destroying the thing it does not measure
+
+The near-field detail layer is `mix(baseNormal, detailNormal, w)`. It does not
+add detail — it **trades** base for detail, and the base is where the large-scale
+clod and blob structure lives. mean|Laplacian|, the statistic that defined the
+defect, rises monotonically as the blobs are destroyed, so judging the gain on it
+alone recommends w = 1.0 and a band of uniform crunch.
+
+I went in believing 0.35 over the shipped 0.55, having seen at 3x magnification
+what I read as an even stipple of same-sized marks — the scale-uniformity failure
+this project documented earlier. **Three instruments refuted me and my eye was
+wrong on every axis I had reasoned about.**
+
+| gain | mean\|Laplacian\| | coarse variation kept | octave peak share | periodicity |
+|---|---|---|---|---|
+| 0 (off) | 1.48 | 100% | 32.1% | r 0.199 |
+| 0.35 | 2.47 | 87% | 25.6% | r 0.134 |
+| 0.55 | 3.37 | 79% | 21.6% | r 0.085 |
+
+The layer at 0.55 is the **least** periodic of the three and has the **flattest**
+octave spectrum — energy within a few points of even across all five scales,
+which is the scale-invariant signature of a natural surface. The forced-off arm
+is the narrow-band one, with 63% of its energy in the two coarsest octaves. The
+percept I was reacting to was pattern-seeking in a broadband field.
+
+Three transferable pieces. **A magnified crop is the wrong place to judge whether
+a surface is too busy**, because busyness is a density and magnification changes
+it; the 1x view is the only one the viewer sees, and my read flipped between 3x
+and 1x. **Bracket a tuning parameter with a statistic for each side of its
+trade**, not one for the side you are trying to improve. And when the eye and
+three measurements disagree, the useful move is to find the measurement that
+would vindicate the eye — I looked for periodicity and scale-narrowing
+specifically because that is what I thought I was seeing, and their absence is
+worth far more than the agreement of the statistics I already had.

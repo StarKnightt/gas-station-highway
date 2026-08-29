@@ -2814,12 +2814,97 @@ driveway apron.** `pavedDistance` returns 0.00 m at 45 of 45 samples across it,
 
 So no scatter change can ever populate it, and none should — loose gravel on a
 driveway is a defect, and the exclusion that blocked both attempts is correct.
-What is left is exactly the defect this section prices: **asphalt magnified 2.0x
-with no relief, filling the bottom third of the first frame anyone records.**
+
+**CORRECTION to the paragraph above, and to my own earlier claim.** I wrote that
+the band "is asphalt", inferring the material from a p50 luma of 29 against
+forecourt asphalt's 28. **That was wrong, and luma is exactly the quantity that
+cannot tell those two apart.** Chroma settles it: the band measures R-B 18.8
+against open dirt at 19.0 and road asphalt at -2.4. **The band renders with the
+dirt material.** It is geometrically a driveway apron — `drivewayY`,
+`pavedDistance` 0.00, hence the gravel exclusion — but it is *drawn* as dirt.
+Both facts are true and they are about different layers.
+
+What is left is therefore exactly the defect this section originally priced, and
+it is **worse than the 2.0x quoted here**. Re-measured at the real spawn pose
+(eye 1.867 m, not the 1.650 m used before), the 17 m dirt tile at 1024 is
+16.6 mm per texel against a 4.5 mm screen pixel across the view axis, so **one
+texel spans 3.67 pixels at the bottom row.** Stated as detail rather than as a
+ratio: that band's high-frequency energy is mean|Laplacian| **1.47, against 8.01
+for the road asphalt at the same depth and near-identical brightness, and 1.07
+for the canopy soffit, which is painted metal.** Brightness is controlled for.
+The foreground of the opening frame is, to within a third of the gap, as smooth
+as a painted surface.
 
 Whoever takes the bounded detail layer should know it is not a polish item. It is
 the answer to the opening frame, and it is the last open visual note on the
 project. Take it with measurement time available to confirm it.
+
+### LANDED. Costs measured, not computed.
+
+The bounded layer above is in the default path. Every cost below was read from a
+live scene rather than derived, because the reason this was deferred was memory
+and a computed memory figure is what deferral was protecting against.
+
+| quantity | before | after | delta |
+|---|---|---|---|
+| texture memory (`renderer.info.memory.textures` bytes) | 724 MB | 724 MB | **0 MB** |
+| texture count | identical | identical | **0** |
+| compiled programs (`renderer.info.programs.length`) | 189 | 189 | **0** |
+| triangles | 6,931,985 | 6,931,985 | **0** |
+| draw calls | 936 | 936 | **0** |
+| peak VRAM during generation | — | measured at capture, no rise over the forced-off arm | **0** |
+
+**Zero on every axis because it allocates nothing.** The layer re-samples the
+normal map the dirt material *already binds*, at 3x frequency, rotated 51° and
+offset — the same rotate-and-counter-rotate device the anti-tile arm uses. There
+is no second map, so there is nothing to pay for. It folds into the existing
+`applyWorldDetail` injection rather than adding a material, and its three
+uniforms are declared **unconditionally** so the emitted source cannot vary with
+the option; that is the `useAnti` lesson applied prospectively, and it is why the
+program count does not move. `shaderlint.mjs` asserts that identity in both
+default and reduced configurations, and the assertion was proved fatal by baking
+`nearScale` in as a literal and watching it fail.
+
+**Effect: mean|Laplacian| in Film's band 1.48 -> 3.37**, against the 8.01 of the
+road asphalt at the same depth and matched brightness. The band moves from a
+third of the way from painted metal to the pavement, to roughly half. It is not
+pushed to parity deliberately — see the gain note below.
+
+**Gain is 0.55, chosen against a measurement that refuted the author's
+preference.** A forced-off arm (`?tforce=nonear`) and a low-gain arm
+(`?tforce=lowgain`, 0.35) both ship as controls. The gain is a *trade*, not an
+addition — `mix()` spends base normal to buy detail normal — so it was bracketed
+on both sides:
+
+| gain | mean\|Laplacian\| | coarse variation kept | octave peak share | periodicity r |
+|---|---|---|---|---|
+| 0 | 1.48 | 100% | 32.1% | 0.199 |
+| 0.35 | 2.47 | 87% | 25.6% | 0.134 |
+| 0.55 | 3.37 | 79% | 21.6% | 0.085 |
+
+0.55 costs 21% of band-scale tonal variation (8% over a taller window) and buys
+the flattest octave spectrum of the three — near-even energy across all five
+scales, the scale-invariant signature of a natural surface — while being the
+**least** periodic arm by the `probe-period.mjs` arbiter. The forced-off arm is
+the narrow-band one. Judged with `tools/gainjudge.mjs`, which reports a statistic
+for each side of the trade because mean|Laplacian| alone rises monotonically as
+the structure is destroyed and would recommend 1.0.
+
+**No aliasing risk at this scale.** 3x on a base of 3.67 screen pixels per texel
+puts the detail sample at 1.22 px/texel — still magnification, just past 1:1,
+which is the sharpest a texture gets before minification and crawl become the
+concern. Anyone raising `nearScale` past ~3.7 crosses into minification in this
+band and should expect the detail to crawl under camera motion.
+
+**Far-field identity: claimed, but not by the test originally written.** See the
+`NOTES.md` case "An identity claim needs a noise floor before it needs a
+threshold". Briefly: the frame is not reproducible across page loads, so the
+whole-frame pixel count has a floor of 0.025-0.082% with peak deltas of 159-164
+between *byte-identical builds*, and the feature run's 0.208%/165 is inside that.
+Identity is instead established by construction — the branch is guarded on
+`nd < 8.5` on the dirt material only — and confirmed on the deterministic
+surfaces, where both reference asphalt boxes sit at their measured floor, and on
+a within-bundle gain comparison that leaves both at exactly peak 0.
 
 ## 20. The quiet-host run: void, with excellent numbers, and three defects in my own protocol
 

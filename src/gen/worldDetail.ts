@@ -228,6 +228,43 @@ export interface WorldDetailOptions {
   normalFade?: boolean;
 
   /**
+   * Near-field detail relief: strength of a second, higher-frequency sample of
+   * the material's own normal map, cross-faded in over the last few metres in
+   * front of the camera. 0 disables it and is the forced-off control.
+   *
+   * WHAT IT IS FOR. A ground map is authored for the distance it spends most of
+   * its area at, and the immediate foreground is the one place that choice is
+   * wrong. At the spawn pose the 17 m dirt tile at 1024 is 16.6 mm per texel
+   * against a 4.5 mm screen pixel across the view axis, so **one texel spans
+   * 3.67 pixels at the bottom row** and the surface arrives blurred. Measured
+   * as high-frequency energy, that band sits at mean|Laplacian| 1.47 against
+   * 8.01 for the road asphalt at the same depth and near-identical brightness,
+   * and 1.07 for the canopy soffit — which is painted metal. It is, to within a
+   * third of the gap, as smooth as a painted surface.
+   *
+   * WHY IT COSTS NO MEMORY. It re-samples `normalMap`, the map the material has
+   * already bound, at `nearScale` times the frequency. No new texture, no new
+   * sampler, no new attribute. Detail mapping does not invent detail — it reuses
+   * the authored features at a smaller world size, which for soil clods is
+   * physically reasonable, since soil has structure at every scale.
+   *
+   * WHY IT COSTS NO PROGRAM. These are uniforms and not build flags, so the
+   * emitted source is byte-identical whether the feature is on, off, or retuned.
+   * `shaderlint.mjs` asserts that. A build flag here would have split the key.
+   */
+  nearDetail?: number;
+
+  /** Frequency multiplier for the near-field sample. 3.0 turns a 17 m tile into
+   *  5.7 m, i.e. 5.5 mm per texel, which is 1.22 pixels per texel at the bottom
+   *  row instead of 3.67. Higher is sharper and eventually aliases. */
+  nearScale?: number;
+
+  /** Metres at which the near-field detail begins to fade, and where it reaches
+   *  exactly zero. Past the second number the branch is not taken at all, so the
+   *  far field is bit-identical rather than approximately unchanged. */
+  nearRange?: [number, number];
+
+  /**
    * The world-space soil field (see `gen/groundSoil.ts`), which organises the
    * ground by drainage, disturbance, wetness and material instead of by free
    * noise. Absent on every material that does not pass it, so no uniform and
@@ -279,6 +316,9 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
     erodeAlpha = 0,
     antiTile = 0,
     normalFade = true,
+    nearDetail = 0,
+    nearScale = 3,
+    nearRange = [4, 8],
     soil,
     specularEnv = 1,
     directSpec = 1,
@@ -351,6 +391,14 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
     uSpecIBL: { type: "float", value: specularEnv },
     uSpecDirect: { type: "float", value: directSpec },
     uAntiTile: { type: "float", value: antiTile },
+    // Unconditional on purpose. Declared for every material whether or not it
+    // uses them, so the emitted source and the uniform declaration block are
+    // identical across materials and the program-key count cannot move. Three
+    // floats of upload per material against a shader program is not a trade
+    // worth thinking about twice.
+    uNearGain: { type: "float", value: nearDetail },
+    uNearScale: { type: "float", value: nearScale },
+    uNearRange: { type: "vec2", value: new THREE.Vector2(nearRange[0], nearRange[1]) },
   };
   if (useOverlay) {
     U.uOverlay = { type: "sampler2D", value: overlay };
@@ -1311,6 +1359,53 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
       #endif`;
 
     /**
+     * The near-field detail arm for the bump.
+     *
+     * Same device as the anti-tile arm above — a rotated, rescaled second sample
+     * of the map the material already has — but aimed at the opposite end of the
+     * distance range and gated on distance instead of on a macro mask. Anti-tile
+     * samples at 0.63x to hide a period that shows from 40 m; this samples at 3x
+     * to restore detail the map runs out of inside 8 m.
+     *
+     * THE BRANCH IS THE IDENTITY GUARANTEE. `if (nd < uNearRange.y)` means the
+     * far field does not execute this at all, so it is bit-identical rather than
+     * approximately unchanged. A `mix()` with a zero weight would not be: the
+     * outer `normalize()` of an already-unit vector is free to move the last bit,
+     * and "almost identical" on a surface other agents have already accepted is
+     * not worth the argument. Same reason `uNearGain > 0.0` guards the whole
+     * thing rather than multiplying the weight by it — the forced-off arm has to
+     * be provably the old frame, not a frame that rounds to it.
+     *
+     * The rotation is 51 degrees rather than the anti-tile arm's 41, and the
+     * offset differs, so the two alternate samples of the same map do not land
+     * on the same features. They overlap in range only where anti-tile has
+     * barely begun, but decorrelating them costs one constant.
+     *
+     * The tangent XY is counter-rotated for exactly the reason spelled out on
+     * the anti-tile arm: a slope sampled in a rotated frame is expressed in that
+     * frame, and handing it to `tbn` unrotated lights it from the wrong
+     * direction and adds a second bump rather than sharpening the first.
+     */
+    const nearDetailInject = `
+      #if defined( USE_NORMALMAP_TANGENTSPACE )
+        if (uNearGain > 0.0) {
+          float nd = distance(cameraPosition, vWDetailPos);
+          if (nd < uNearRange.y) {
+            mat2 ndrot = mat2(0.629, -0.777, 0.777, 0.629);
+            vec3 ndN = texture2D(normalMap,
+              ndrot * vNormalMapUv * uNearScale + vec2(0.11, 0.73)).xyz * 2.0 - 1.0;
+            #if defined( USE_PACKED_NORMALMAP )
+              ndN = vec3(ndN.xy, sqrt(saturate(1.0 - dot(ndN.xy, ndN.xy))));
+            #endif
+            ndN.xy = mat2(0.629, 0.777, -0.777, 0.629) * ndN.xy;
+            ndN.xy *= normalScale;
+            float ndw = (1.0 - smoothstep(uNearRange.x, uNearRange.y, nd)) * uNearGain;
+            normal = normalize(mix(normal, normalize(tbn * ndN), ndw));
+          }
+        }
+      #endif`;
+
+    /**
      * The soil arm for the bump: the second material's relief, and the water.
      *
      * Flattening the normal where the field says there is standing water is
@@ -1394,6 +1489,7 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
     assertDeclared(colorInject, "colour injection");
     assertDeclared(roughInject, "roughness injection");
     assertDeclared(normalAntiInject, "normal-map anti-tile injection");
+    assertDeclared(nearDetailInject, "near-field detail injection");
     assertDeclared(soilNormalInject, "soil normal injection");
     assertDeclared(specInject, "specular injection");
     assertDeclared(envInject, "environment injection");
@@ -1410,6 +1506,7 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
           "#include <normal_fragment_maps>",
           `#include <normal_fragment_maps>
            ${normalAntiInject}
+           ${nearDetailInject}
            ${soilNormalInject}
            // Aggregate has to stop being gravel by the far field or the lot looks
            // like crumpled foil, but this was pulled in to 4.5-42 m to fix a

@@ -3288,3 +3288,266 @@ And the whole-frame diff is what rescued the second round. Five fixed boxes said
 0.00% everywhere, which reads as "the change did nothing"; the diff found 5,377
 changed pixels and proved the gate had executed. **Chosen regions answer the
 question you asked; a whole-frame diff answers the one you did not.**
+
+## CORRECTION: the band is dirt, not asphalt
+
+I claimed above that Film's band "is the paved driveway apron... p50 of 29
+matching forecourt asphalt at 28". **The material claim was wrong.** I inferred
+it from p50 luma, and luma is the one quantity that cannot separate warm dirt
+from grey asphalt at equal brightness. Chroma settles it in one line:
+
+| surface | R-B | warmth R/B |
+|---|---|---|
+| Film's band | **18.8** | 1.83 |
+| open dirt | **19.0** | 1.66 |
+| forecourt asphalt | 9.1 | 1.25 |
+| road asphalt | -2.4 | 0.93 |
+
+**The band renders with the dirt material.** It is geometrically a driveway apron
+— `drivewayY`, `pavedDistance` 0.00, which is why the gravel exclusion fired and
+why that half of the finding stands. But the surface drawn there is dirt. Two
+layers, two answers, and I collapsed them into one.
+
+An 8x crop of the archived frame shows it plainly: blurred brown with dark blobs,
+no aggregate, no crisp edge anywhere. Nothing about it looks like pavement. **I
+had the crop and the chroma available when I made the claim and used neither**,
+because the luma number agreed with the story I already had.
+
+## The near-field detail layer: costs and prediction, before capture
+
+### Memory: 0 MB. Programs: 0.
+
+**Zero new bytes.** The layer re-samples `normalMap` — the map the material has
+already bound — at 3x frequency. No new texture, no new sampler, no new
+attribute. Detail mapping does not invent detail; it reuses authored features at
+a smaller world size, which for soil clods is physically reasonable.
+
+**Zero new programs, by construction rather than by luck.** The arm is built from
+three uniforms (`uNearGain`, `uNearScale`, `uNearRange`) declared unconditionally
+for every material, so the emitted source and the declaration block are identical
+across materials and the distinct-key count cannot move. A build flag here would
+have split the key.
+
+`shaderlint.mjs` now asserts that, six ways: gain, scale and range each proven not
+to reach the emitted source, in both default and reduced modes. **The gate was
+proven fatal by planting the defect it exists to catch** — baking `nearScale` in
+as a literal — which produced `FAIL ... CHANGES the emitted source` in both modes
+and exit 1. Reverted and re-verified clean.
+
+### Why this surface and not the others
+
+Only the dirt material gets it. The road and forecourt asphalt measure
+mean|Laplacian| 8.01 and 5.55 in the near field against this surface's 1.47, so
+they are not short of detail and sharpening them would be a change with no defect
+behind it.
+
+### The texel arithmetic, re-measured at the real pose
+
+| screen row | range | px across | px along | pixels per texel across |
+|---|---|---|---|---|
+| 899 | 4.49 m | 4.5 mm | 11.5 mm | **3.67** |
+| 800 | 5.23 m | 5.3 mm | 16.6 mm | 3.15 |
+| 700 | 6.57 m | 6.6 mm | 28.2 mm | 2.51 |
+| 640 | 8.46 m | 8.5 mm | 46.8 mm | 1.95 |
+
+At 3x the sample is 5.5 mm per texel, i.e. **1.22 pixels per texel at the bottom
+row instead of 3.67**. The along-view axis goes minified, which is mip and
+anisotropy territory and not a problem. `PERF.md`'s original 2.0x came from
+comparing an along-view pixel footprint at a different eye height against an
+isotropic texel; the across-view axis is the limiting one.
+
+### The prediction
+
+**PRIMARY A, presence.** Changed pixels between `default` and `?tforce=nonear`
+in Film's band rise from 0.00% to **at least 15%**.
+
+**PRIMARY B, identity.** Changed pixels in rows 0-599 are **exactly 0.00%, with a
+largest delta of any size of 0.** Row 600 is the first row whose closest ground
+anywhere across the frame width is beyond the 8.5 m cutoff (8.52 m, swept at
+25 px). The arm is guarded by `if (nd < uNearRange.y)` and by `uNearGain > 0.0`
+rather than scaled by them, precisely so this is a bit-identity claim and not a
+rounding one. A `mix()` at zero weight would not qualify: the outer `normalize()`
+of an already-unit vector may move the last bit.
+
+**SECONDARY, appearance.** Band mean|Laplacian| rises from **1.47 to at least
+3.0**, target 3.0-8.0, ceiling set by the road asphalt beside it at 8.01.
+
+**FALSIFIER.** If PRIMARY A passes and SECONDARY does not, the layer is moving
+pixels without adding high-frequency content, which means the detail sample is
+being filtered away — check `nearScale` against the texel arithmetic, not the
+gain.
+
+`tools/nearjudge.mjs` enforces all three and selftests: 50.40% presence on a
+planted frame, 0.00% identity with worst-delta 0, hipass 0.12 -> 28.32.
+
+## Result: 2 of 3 predictions met; PRIMARY B is untestable as I specified it
+
+Rounds `2026-08-29T135751Z-119cb4b28b9b` (default) and
+`2026-08-29T140040Z-119cb4b28b9b` (`?tforce=nonear`), same bundle, RTX 4060
+verified on both. `nearjudge.mjs` exit 1 on PRIMARY B.
+
+### Costs, confirmed live rather than computed
+
+| | before | after |
+|---|---|---|
+| `textureMB` | 157.6 | **157.6** |
+| textures | 23 | **23** |
+| `renderer.info.programs.length` | 185 | **185** |
+| `wd` programs | 12 | **12** |
+| triangles | 534,780 | **534,780** |
+
+**0 MB and 0 programs, measured.** Peak VRAM across the capture was 3,530 MiB
+against a 2,435 MiB idle baseline, so the whole scene occupies ~1,095 MiB — well
+inside the ~3x headroom Perf established, and the figure is for the scene, not
+for this feature, which allocates nothing.
+
+### PRIMARY A — presence: PASS
+
+**23.50% of Film's band changed**, mean delta 12.6, against a predicted >= 15%.
+
+### SECONDARY — appearance: PASS, as predicted
+
+**Band mean|Laplacian| 1.48 -> 3.37**, predicted >= 3.0 in a 3.0-8.0 window. The
+falsifier did not fire: presence and appearance moved together, so the detail is
+reaching the frame rather than being filtered away. The band is now a quarter of
+the way to the road asphalt beside it at 8.01, from a twentieth.
+
+### PRIMARY B — identity: FAILED, and the fault is in the test
+
+0.208% of rows 0-599 changed, largest delta 165. That is far too large to be a
+rounding artefact, and it is not my guard. Separating the identity zone by
+content:
+
+| content, all beyond the 8.5 m cutoff | changed | max delta |
+|---|---|---|
+| pine crowns | 17.4% | 163 |
+| grass and scrub | 12.4% | 165 |
+| treeline centre | 3.3% | 155 |
+| bare dirt plain | 1.1% | 22 |
+| bare dirt, far centre | 2.7% | 19 |
+| open ground mid-right | 0.39% | 2 |
+| forecourt asphalt (under canopy) | 0.058% | 2 |
+| **sky** | **0.003%** | **5** |
+| canopy soffit | 0.000% | 0 |
+
+**The sky moved.** A change to the dirt material's normal inside 8.5 m cannot
+alter a sky pixel, so **the two runs are not bit-reproducible and the premise of
+the test is false.** Everything else follows: the large deltas are all on
+wind-animated foliage, and the small ground deltas are largest exactly where
+foliage stands above the ground and smallest on the one ground surface with no
+foliage over it — forecourt asphalt under the canopy, at max delta 2. Moving
+crowns move their shadows.
+
+**So PRIMARY B is neither confirmed nor refuted.** I predicted bit-identity
+across two independent page loads on a renderer that does not reproduce bit-exact
+across page loads. The source-level guarantee still stands and is checkable by
+reading — the arm is inside `if (nd < uNearRange.y)` and `if (uNearGain > 0.0)`,
+and `shaderlint.mjs` proves the source does not vary — but I claimed a measured
+result and did not get one.
+
+**The test that would settle it is default against default**, one extra capture,
+establishing the cross-run noise floor. If an identical pair shows the same
+~0.2% and the same 165 on foliage, PRIMARY B is a test artefact and the identity
+claim holds to the limit of what this harness can measure. Not taken yet.
+
+**The general error is one I have now made in a new way.** An identity claim
+needs a noise floor before it needs a threshold, and I set the threshold to zero
+without ever measuring whether zero was achievable. A control that establishes
+"what does not changing look like" is as necessary as the forced-off arm that
+establishes "what the feature does".
+
+## The noise-floor bundle: PRIMARY B settled, and the gain decided against me
+
+Three arms, one bundle `4d0e59f293e9`, all at the spawn pose: two byte-identical
+default captures and one at gain 0.35. Both comparisons are therefore
+within-bundle. All three arms reported identical `draws=936 tris=6931985`.
+
+### The floor, and what it retires
+
+Five pairs, every one of them a comparison in which a far-field ground change is
+impossible by construction:
+
+| pair | what differs | rows 0-599 changed | peak delta |
+|---|---|---|---|
+| a vs b | **nothing — identical builds** | 0.082% | 164 |
+| a vs low | gain, inside 8.5 m only | 0.025% | 164 |
+| b vs low | gain, inside 8.5 m only | 0.078% | 159 |
+| default vs nonear | the feature, inside 8.5 m only | 0.208% | 165 |
+| a vs b, strictest any-delta form | **nothing** | 0.92% | 159 |
+
+**The feature run sits inside the floor.** The peak delta is the flat one — 159
+to 165 across every pair including the identical one — while the count swings by
+an order of magnitude between pairs where nothing whatsoever differs, because it
+tracks which phase the wind was on when the frame was grabbed. **The wind landed
+about an hour before this work; these numbers are that feature, not instability.**
+
+The discriminating fact is that **Film's band changed 0.00% between the two
+identical builds**, as did both reference asphalt boxes. The ground reproduces
+exactly. Only the animated content and the sky behind it do not. So the
+impossibility argument from last round — a change to the dirt material's normal
+inside 8.5 m cannot alter a sky pixel — is confirmed by control rather than
+inferred.
+
+`nearjudge.mjs` was changed accordingly: the whole-frame count is **reported with
+its measured floor and no longer gated**, and identity is judged on the
+deterministic reference surfaces. Their tolerance is 2, which is *also* measured
+rather than assumed — one box came out at peak 0 between identical builds and the
+other at peak 2. It is not permissive: a guard actually reaching past the fade
+produces the mean|d| 12.6 the band shows. The selftest now plants a reference
+leak and requires the gate to catch it, so the gate has been made to fail on
+purpose. **With that, all three predictions pass.**
+
+### A tool I built and deleted in the same hour
+
+I first tried to rescue the zero threshold by masking to pixels that two
+same-build captures agree on, so that only deterministic pixels carry the claim.
+Its selftest passed, including a planted leak and a planted animated-only change
+it correctly ignored. Then I ran it on two byte-identical builds and **it
+reported a leak — 0.92%, peak 159, on a comparison where a leak cannot exist.**
+A mask built from two samples cannot find a pixel that flickers, because such a
+pixel often agrees across any two draws. I deleted it rather than raise its
+threshold; a tool that fires where the fault cannot exist has no working range.
+Written up in `NOTES.md`.
+
+### The gain: I predicted 0.35, measured, and kept 0.55
+
+I went in believing 0.55 spent too much of the large-scale blob structure, and
+said so before capturing. It does spend some, and less than I thought, and every
+axis I was worried about moved the other way.
+
+| gain | mean\|Laplacian\| | coarse kept (band / tall) | octave peak share | periodicity r |
+|---|---|---|---|---|
+| 0 (nonear) | 1.48 | 100% / 100% | 32.1% | 0.199 |
+| 0.35 (lowgain) | 2.47 | 87% / 95% | 25.6% | 0.134 |
+| 0.55 (shipped) | 3.37 | 79% / 92% | 21.6% | 0.085 |
+
+**0.55 is the least periodic arm and has the flattest octave spectrum** — energy
+within a few points of even across all five scales, which is what a scale-
+invariant natural surface looks like. The forced-off arm is the narrow-band one,
+with 63% of its energy in the two coarsest octaves. The cost is 21% of band-scale
+tonal variation and 8% over a taller window, paid for 2.28x the statistic that
+defined the defect, on a surface still only about half way to the sharpness of
+the pavement beside it. Nothing here is close to overshoot.
+
+**My contrary percept was an artefact of the crop scale.** At 3x I read the
+0.55 arm as an even stipple of same-sized marks; at 1x, the scale the viewer
+actually sees, that reading did not survive, and the periodicity arbiter put it
+at r 0.085 against the forced-off arm's 0.199. Busyness is a density and
+magnification changes it. Judge a texture at 1x.
+
+`tools/gainjudge.mjs` is the instrument, and its point is that it reports a
+statistic for **each side** of the trade: mean|Laplacian| for the detail being
+bought and blurred-plane sd plus an octave-share breakdown for the structure
+being spent. Its selftest plants a blobs-only field and a grain-only field and
+requires the two metrics to separate them, because two metrics that track the
+same thing are one metric.
+
+It also caught its own bug on first run: a region 20 rows past the bottom of a
+900-row frame produced undefined samples, and the finite guard threw instead of
+returning a plausible mean. That is the NaN case this project has been bitten by
+twice, behaving correctly for once.
+
+### Shipped configuration
+
+Gain **0.55**, `nearScale` 3, `nearRange` [3.5, 8.5], on the dirt material only.
+Two control arms ship with it: `?tforce=nonear` (0) and `?tforce=lowgain` (0.35).
