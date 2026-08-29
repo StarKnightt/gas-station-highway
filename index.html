@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dawn Station</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0b0a0c; }
+      canvas { display: block; width: 100%; height: 100%; }
+      #hud {
+        position: fixed; inset: 0; display: grid; place-items: center;
+        font: 500 15px/1.5 ui-sans-serif, system-ui, sans-serif;
+        color: #f2e6d8; text-shadow: 0 1px 3px #000a; pointer-events: none;
+      }
+      #hud .card {
+        pointer-events: auto; padding: 18px 26px; border-radius: 10px;
+        background: #16121099; backdrop-filter: blur(6px);
+        border: 1px solid #ffffff1a; text-align: center;
+      }
+      #hud.hidden { display: none; }
+      #loading {
+        position: fixed; inset: 0; display: grid; place-items: center;
+        font: 500 14px ui-sans-serif, system-ui, sans-serif; color: #a9998a;
+        background: #0b0a0c; transition: opacity .5s ease;
+      }
+      #loading.done { display: none; }
+    </style>
+  </head>
+  <body>
+    <div id="loading">generating surfaces&hellip;</div>
+    <div id="hud" class="hidden">
+      <div class="card">
+        <div>Click to look around</div>
+        <div style="opacity:.6;font-size:13px;margin-top:6px">WASD to walk &middot; Esc to release</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

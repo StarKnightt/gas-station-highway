@@ -1,0 +1,55 @@
+<!doctype html>
+<!--
+  A page whose only job is to generate a texture and hand the buffer back.
+
+  It exists because `makeAsphalt` draws its cracks through a DOM canvas and so
+  cannot be generated in Node, which meant the buffer-side measurement that
+  settled the dirt was unavailable for the one surface with a confirmed artefact
+  in it. The capture harness is already a browser, so the constraint is only a
+  constraint if you insist on measuring from Node.
+
+  Served by `vite dev` at the project root, which is what makes the bare
+  `/src/gen/textures.ts` import resolve. Driven by `tools/asphaltscan.mjs`; the
+  analysis deliberately does NOT live here, so that there is exactly one
+  implementation of it, in `tools/mapspectrum.mjs`.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>asphalt probe</title>
+  </head>
+  <body>
+    <pre id="log">loading…</pre>
+    <script type="module">
+      const log = (m) => {
+        document.getElementById("log").textContent = m;
+      };
+
+      /**
+       * Returns the height channel as a plain array of bytes, plus whatever else
+       * the caller asked to see. Bytes rather than floats because 2048 squared
+       * floats is a 32 MB structured clone and the source data is 8-bit anyway.
+       */
+      window.__probe = async (opts) => {
+        const { makeAsphalt } = await import("/src/gen/textures.ts");
+        const { size, tile, seed, options } = opts;
+        const maps = makeAsphalt(size, tile, seed, options);
+        const out = {};
+        for (const channel of opts.channels) {
+          const img = maps[channel]?.image;
+          if (!img) throw new Error(`no channel ${channel}`);
+          const d = img.data;
+          const stride = d.length / (size * size);
+          const bytes = new Uint8Array(size * size);
+          for (let i = 0; i < size * size; i++) bytes[i] = d[i * stride];
+          out[channel] = Array.from(bytes);
+        }
+        for (const k of Object.keys(maps)) maps[k]?.dispose?.();
+        return out;
+      };
+
+      window.__probeReady = true;
+      log("ready");
+    </script>
+  </body>
+</html>

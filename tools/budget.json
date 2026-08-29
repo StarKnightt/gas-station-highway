@@ -1,0 +1,34 @@
+{
+  "_comment": "Accepted cost ceilings, enforced by tools/budget.mjs. Measured from the renderer and the GL calls it makes, never from a system's own report. Raise a number only with a reason.",
+  "recorded": "2026-08-28T22:15:17.973Z",
+  "tolerancePct": 5,
+  "global": {
+    "textureBytes": 751968768,
+    "bufferBytes": 53924464,
+    "programs": 144,
+    "sceneTriangles": 1873499,
+    "biggestShadowMap": 8192
+  },
+  "shots": {
+    "approach": {
+      "drawCalls": 517,
+      "triangles": 3020020
+    },
+    "lot": {
+      "drawCalls": 429,
+      "triangles": 3014096
+    },
+    "pumps": {
+      "drawCalls": 395,
+      "triangles": 2796644
+    },
+    "ground": {
+      "drawCalls": 517,
+      "triangles": 3020020
+    },
+    "wide": {
+      "drawCalls": 517,
+      "triangles": 3020020
+    }
+  }
+}
