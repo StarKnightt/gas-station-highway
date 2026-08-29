@@ -1,15 +1,8 @@
 name: Deploy to GitHub Pages
 
-# The `push` trigger is deliberately absent, not forgotten. GitHub Pages cannot
-# serve from a private repository on this account's plan, so until either the
-# repo is made public or the plan changes, every push would produce a failing
-# check on a tree that seven agents commit to. Run it by hand from the Actions
-# tab meanwhile, and add this back when Pages is actually enabled:
-#
-#   push:
-#     branches: [main]
-#
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:

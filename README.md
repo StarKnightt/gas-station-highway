@@ -12,6 +12,12 @@ ridge and the whole soundscape are computed at load time.
 *A spawn frame straight out of the running build. Nothing in it is composited,
 and nothing in it was loaded from a file.*
 
+**Walk it: https://starknightt.github.io/gas-station-highway/**
+
+Read the first-load note below before you open that link — the very first load
+in a given browser takes about **216 seconds**, and almost all of it is your
+graphics driver compiling shaders. Every load after it takes about twenty.
+
 It wants a desktop GPU. There is no reduced-quality mobile version, but there
 are three quality tiers and the scene picks one from the hardware it finds.
 
