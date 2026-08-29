@@ -414,6 +414,108 @@ async function main() {
         }
       }
 
+      /*
+       * A second search, for a different question.
+       *
+       * The widest path answers "can the player get there and what is the
+       * tightest gap", and it is the right instrument for that. It is the wrong
+       * instrument for "what would a player walk", because maximising the
+       * bottleneck makes it *prefer* a wide detour to a narrow shortcut — by
+       * construction it returns the longest acceptable route, so a detour ratio
+       * measured on it says more about the search than about the shop.
+       *
+       * A player walks the shortest route their body fits through. That is a
+       * plain shortest path restricted to cells with clearance above the body
+       * radius: same grid, same clearance field, Dijkstra on distance with a
+       * hard admission test instead of max-min on width. Reporting both is the
+       * point — the widest path says whether the shop is passable, the shortest
+       * says whether it is crossable.
+       */
+      const RADIUS = 0.32;
+      /** North of this is inside the shop; the entry threshold sits at z 31.5–31.7. */
+      const DOORWAY_Z = 31.8;
+      const dist = new Float64Array(N).fill(Infinity);
+      const spar = new Int32Array(N).fill(-1);
+      const sdone = new Uint8Array(N);
+      const admits = (k) => C[k] > RADIUS + 0.005;
+      {
+        const hv = [0];
+        const hk = [seed];
+        let n2 = 1;
+        const push2 = (v, k) => {
+          let i = n2++;
+          hv[i] = v;
+          hk[i] = k;
+          while (i > 0) {
+            const p2 = (i - 1) >> 1;
+            if (hv[p2] <= hv[i]) break;
+            const tv = hv[p2];
+            const tk = hk[p2];
+            hv[p2] = hv[i];
+            hk[p2] = hk[i];
+            hv[i] = tv;
+            hk[i] = tk;
+            i = p2;
+          }
+        };
+        const pop2 = () => {
+          const rv = hv[0];
+          const rk = hk[0];
+          n2--;
+          if (n2 > 0) {
+            hv[0] = hv[n2];
+            hk[0] = hk[n2];
+            let i = 0;
+            for (;;) {
+              const l = 2 * i + 1;
+              const r = l + 1;
+              let m = i;
+              if (l < n2 && hv[l] < hv[m]) m = l;
+              if (r < n2 && hv[r] < hv[m]) m = r;
+              if (m === i) break;
+              const tv = hv[m];
+              const tk = hk[m];
+              hv[m] = hv[i];
+              hk[m] = hk[i];
+              hv[i] = tv;
+              hk[i] = tk;
+              i = m;
+            }
+          }
+          return [rv, rk];
+        };
+        // The spawn is admitted unconditionally: the player is standing there, so
+        // a clearance test that excluded it would report an empty world.
+        dist[seed] = 0;
+        hv[0] = 0;
+        while (n2 > 0) {
+          const [d, k] = pop2();
+          if (sdone[k]) continue;
+          sdone[k] = 1;
+          const i = k % nx;
+          const j = (k - i) / nx;
+          const nb2 = [
+            [i + 1 < nx ? k + 1 : -1, cell],
+            [i > 0 ? k - 1 : -1, cell],
+            [j + 1 < nz ? k + nx : -1, cell],
+            [j > 0 ? k - nx : -1, cell],
+            [i + 1 < nx && j + 1 < nz ? k + 1 + nx : -1, cell * Math.SQRT2],
+            [i > 0 && j + 1 < nz ? k - 1 + nx : -1, cell * Math.SQRT2],
+            [i + 1 < nx && j > 0 ? k + 1 - nx : -1, cell * Math.SQRT2],
+            [i > 0 && j > 0 ? k - 1 - nx : -1, cell * Math.SQRT2],
+          ];
+          for (const [m, w] of nb2) {
+            if (m < 0 || sdone[m] || !admits(m)) continue;
+            const nd = d + w;
+            if (nd < dist[m]) {
+              dist[m] = nd;
+              spar[m] = k;
+              push2(nd, m);
+            }
+          }
+        }
+      }
+
       // Targets from the registry, not typed in, so they cannot drift from
       // where the objects actually are.
       const targets = [];
@@ -491,6 +593,9 @@ async function main() {
         );
         let bv = -1;
         let bk = -1;
+        // Cells within reach of the target that the shortest search admitted and
+        // that can actually see it. The same LOS test as the widest path uses.
+        const admissible = [];
         const i0 = Math.max(0, Math.floor((t.x - reach - x0) / cell));
         const i1 = Math.min(nx - 1, Math.ceil((t.x + reach - x0) / cell));
         const j0 = Math.max(0, Math.floor((t.z - reach - z0) / cell));
@@ -501,7 +606,6 @@ async function main() {
             const pz = cz(j);
             if (Math.hypot(px - t.x, pz - t.z) > reach) continue;
             const k = j * nx + i;
-            if (best[k] <= bv) continue;
             let blocked = false;
             for (const { b } of occluders) {
               if (segHitsRect(px, pz, t.x, t.z, b)) {
@@ -510,6 +614,8 @@ async function main() {
               }
             }
             if (blocked) continue;
+            if (Number.isFinite(dist[k])) admissible.push(k);
+            if (best[k] <= bv) continue;
             bv = best[k];
             bk = k;
           }
@@ -546,29 +652,72 @@ async function main() {
         cells.reverse();
 
         /*
-         * How far the player actually walks, against how far the target is.
+         * How far a player actually walks, from the shortest admissible route
+         * rather than the widest one, and split at the threshold.
          *
-         * "Reachable" and "reachable directly" are different questions, and the
-         * widest-path search answers only the first. It passed this shop while
-         * the only route to the cooler went 18.8 m round the east end to cover
-         * 4.99 m — true, and useless for an 18-second single take, which has to
-         * spend that time on screen. So report the ratio: a detour factor near 1
-         * is a shop you can cross, and anything above about 2 is a shop whose
-         * fixtures are in the way of the route the film needs.
-         *
-         * Measured on the full-resolution cell path, before the decimation that
-         * exists only for driving the controller.
+         * The whole-journey figure is dominated by crossing the forecourt, which
+         * is not the number in question. The film's problem is the *interior*:
+         * 4.99 m of straight line from the door to the cooler, walked as 18.8 m.
+         * So the interior leg is measured on its own, from the first cell past
+         * the doorway line to the target.
          */
-        let pathLen = 0;
-        for (let n = 1; n < cells.length; n++) {
-          const ai = cells[n - 1] % nx;
-          const bi = cells[n] % nx;
-          pathLen += Math.hypot(
-            cx(bi) - cx(ai),
-            cz((cells[n] - bi) / nx) - cz((cells[n - 1] - ai) / nx)
-          );
+        let shortestK = -1;
+        let shortestD = Infinity;
+        for (const k of admissible) {
+          if (dist[k] < shortestD) {
+            shortestD = dist[k];
+            shortestK = k;
+          }
         }
-        const straight = Math.hypot(t.x - spawn.x, t.z - spawn.z);
+        let insideLen = 0;
+        let insideFrom = null;
+        /*
+         * The tightest point on the *shortest* route, which is a different number
+         * from the widest path's bottleneck and, for this question, the decisive
+         * one. The widest path reports the gate on the safest route; this reports
+         * how much room the route a player would actually take leaves them.
+         *
+         * A route can be admissible and still be unwalkable in practice: a gap
+         * giving 30 mm of margin passes a grid test and stops a driven controller
+         * dead, because no steering rule holds a line that well. That gap is what
+         * has to be reported, not the fact that a path exists through it.
+         */
+        let sPinch = Infinity;
+        let sPinchAt = null;
+        let sRoute = [];
+        if (shortestK >= 0 && Number.isFinite(shortestD)) {
+          const scells = [];
+          for (let c = shortestK; c >= 0; c = spar[c]) scells.push(c);
+          scells.reverse();
+          let lx = null;
+          let lz = null;
+          for (let n = 0; n < scells.length; n++) {
+            const ci = scells[n] % nx;
+            const pxs = cx(ci);
+            const pzs = cz((scells[n] - ci) / nx);
+            if (pzs > DOORWAY_Z - 1.5 && C[scells[n]] < sPinch) {
+              sPinch = C[scells[n]];
+              sPinchAt = [Number(pxs.toFixed(2)), Number(pzs.toFixed(2))];
+            }
+            const far = lx === null || Math.hypot(pxs - lx, pzs - lz) >= 0.7;
+            if (far || n === scells.length - 1) {
+              sRoute.push([Number(pxs.toFixed(2)), Number(pzs.toFixed(2))]);
+              lx = pxs;
+              lz = pzs;
+            }
+          }
+          for (let n = 1; n < scells.length; n++) {
+            const ai = scells[n - 1] % nx;
+            const bi = scells[n] % nx;
+            const az = cz((scells[n - 1] - ai) / nx);
+            const bz = cz((scells[n] - bi) / nx);
+            if (az < DOORWAY_Z && bz < DOORWAY_Z) continue;
+            if (insideFrom === null) insideFrom = [Number(cx(ai).toFixed(2)), Number(az.toFixed(2))];
+            insideLen += Math.hypot(cx(bi) - cx(ai), bz - az);
+          }
+        }
+        const insideStraight =
+          insideFrom === null ? null : Math.hypot(t.x - insideFrom[0], t.z - insideFrom[1]);
 
         const route = [];
         let lastX = null;
@@ -591,9 +740,17 @@ async function main() {
           target: [Number(t.x.toFixed(2)), Number(t.z.toFixed(2))],
           targetY: t.y === undefined ? null : Number(t.y.toFixed(2)),
           route,
-          pathLen: Number(pathLen.toFixed(2)),
-          straight: Number(straight.toFixed(2)),
-          detour: Number((pathLen / Math.max(0.01, straight)).toFixed(2)),
+          walk: Number.isFinite(shortestD) ? Number(shortestD.toFixed(2)) : null,
+          insideLen: Number(insideLen.toFixed(2)),
+          insideStraight: insideStraight === null ? null : Number(insideStraight.toFixed(2)),
+          insideFrom,
+          insideDetour:
+            insideStraight === null || insideStraight < 0.2
+              ? null
+              : Number((insideLen / insideStraight).toFixed(2)),
+          sPinch: Number.isFinite(sPinch) ? Number(sPinch.toFixed(3)) : null,
+          sPinchAt,
+          sRoute,
           bottleneck: Number(bv.toFixed(3)),
           at: [Number(px.toFixed(2)), Number(pz.toFixed(2))],
           between: near.slice(0, 2).map((n) => ({
@@ -629,7 +786,14 @@ async function main() {
     const margin = ((r.bottleneck - 0.32) * 1000).toFixed(0);
     console.log(
       `  ${r.name.padEnd(18)} ${r.bottleneck.toFixed(3)} m  ${pass ? "PASS" : "FAIL"}  ` +
-        `walk ${r.pathLen} m for ${r.straight} m straight (detour ${r.detour}x)  ` +
+        `shortest walk ${r.walk ?? "unreachable"} m  ` +
+        (r.insideDetour === null
+          ? ""
+          : `inside: ${r.insideLen} m for ${r.insideStraight} m straight (${r.insideDetour}x)  `) +
+        (r.sPinch === null
+          ? ""
+          : `direct route tightest ${r.sPinch} m = ${((r.sPinch - 0.32) * 1000).toFixed(0)} mm margin ` +
+            `at (${r.sPinchAt[0]}, ${r.sPinchAt[1]})  `) +
         `margin ${margin >= 0 ? "+" : ""}${margin} mm   pinch at (${r.at[0]}, ${r.at[1]})`
     );
     for (const b of r.between) {
@@ -822,7 +986,7 @@ async function main() {
           lastLegs: trace.slice(-3),
         };
       },
-      { route: r.route, target: r.target, probeTargets }
+      { route: r.sRoute && r.sRoute.length > 2 ? r.sRoute : r.route, target: r.target, probeTargets }
     );
   };
 

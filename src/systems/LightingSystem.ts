@@ -231,21 +231,30 @@ export class LightingSystem implements GameSystem {
     // comparison mode, so the type has to change with the patch. Both are set
     // here, before any other system builds a material, because the shadow type
     // is a shader define and a material compiled under the old one keeps it.
-    // `?pcss=1`, opt-in, not default. The original reason is now GONE: Perf has
-    // landed the `BasicShadowMap` branch in `core/shadowMemory.ts` (see the type
-    // check there, which now admits it), so switching no longer costs the 256 MB
-    // mid-frame allocation spike that preallocation removed.
+    // Contact hardening is now the DEFAULT. `?pcss=0` opts out.
     //
-    // It stays opt-in for a second and better reason. PCSS measurably improves
-    // the frame - 23% off the car door artefact, 24% off its local variance -
-    // but *contact hardening* is a claim about a mechanism, that penumbra width
-    // grows with occluder-to-receiver distance, and that is still unproven at
-    // n=2 matched edges. Promoting it on the net improvement would be promoting
-    // a name that has not been measured, which is the same substitution this
-    // file already refuses below when it declines to fall back to PCF. The
-    // isolated-post pose settles it; until then the flag stays.
+    // Both reasons it was opt-in are discharged:
+    //
+    // 1. Memory. Perf has landed the `BasicShadowMap` branch in
+    //    `core/shadowMemory.ts`, so selecting this type no longer skips
+    //    preallocation and no longer hands back the 256 MB mid-frame spike.
+    // 2. Mechanism. It is now *measured* to be contact hardening rather than a
+    //    softer kernel, on the isolated-post rig (`?lpost=1`, pose
+    //    `post_penumbra`, round 2026-08-29T040752Z-f7600160bab5). Seven matched
+    //    edges per side, both edges of the shadow measured independently, same
+    //    build and same browser for both arms:
+    //
+    //      PCF  image-space penumbra: 8.7 -> 6.7 px with distance (shrinks)
+    //      PCSS image-space penumbra: 8.8 -> 12.6 px with distance (grows)
+    //
+    //    PCF shrinking is what a constant world-space kernel MUST do as it
+    //    recedes, so its own trend is the perspective control. The width ratio
+    //    spans 1.89x on one edge and 2.19x on the other and crosses 1.0, which
+    //    means some edges sharpened while others softened. **A change of kernel
+    //    width moves every edge the same way; this did not.** Contrast was flat
+    //    at 19-25 luma levels across the span, so it is not a contrast artefact.
     this.shadowView = q.get("shadowview") === "1";
-    this.pcss = q.get("pcss") === "1" && !this.force.nopcfpatch;
+    this.pcss = q.get("pcss") !== "0" && !this.force.nopcfpatch;
     if (this.pcss) renderer.shadowMap.type = THREE.BasicShadowMap;
     const patches = installLightShaderPatches(
       {

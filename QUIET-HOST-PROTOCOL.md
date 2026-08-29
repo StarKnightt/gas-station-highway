@@ -70,6 +70,33 @@ That is the whole run. It takes roughly 25 minutes including build and init.
 Do **not** run anything else in the window — no second harness, no capture round,
 no `nvidia-smi` polling loop of your own. The harness samples the card itself.
 
+### 2.1 Then: five cold loads, because init reliability is a separate question
+
+```bash
+node tmp/find404.mjs --n=5
+```
+
+Run this **after** the 20-minute run, in the same window.
+
+The 20-minute run loads the scene exactly once, so it says nothing about whether
+a load *reliably* succeeds — and the deliverable is a single continuous take that
+has to survive init on the user's machine, once, with no second attempt.
+
+This is not hypothetical. Under contention, four cold loads gave: **one hard
+`Page crashed` on `page.goto`**, and later **one timeout at 171.9 s against 21.9 s
+and 30.9 s for the two that succeeded** — a 5–8× outlier on the same bundle
+minutes apart. Both faults match what two sibling agents independently reported.
+Neither can be separated from contention on a loaded host, which is exactly why
+they belong here.
+
+**Pass: 5 of 5 loads reach `__SCENE_READY`, and the spread of ready times is
+within 2× of the fastest.** A single crash, timeout, or 5× outlier on a quiet
+host is a deliverable blocker and outranks every frame-time number in this
+document, because a stutter can be re-shot and a failed init cannot be shot at
+all.
+
+(Promote that probe out of `tmp/` if it is kept. It is scratch as written.)
+
 ---
 
 ## 3. What to sample

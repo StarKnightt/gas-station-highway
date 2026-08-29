@@ -2152,3 +2152,30 @@ distance; what remains is bookkeeping that does not need to precede the take.
 4. `probe-unseen` DEGENERATE verdicts against `InstancedMesh` recorded before today
    are void per Vegetation's bounding-sphere finding. Nothing in this system gated on
    one - the car has no instanced geometry - so no car result needs re-running.
+
+### Late confirmation: `surfaceAt` landed and the decal picked it up with no edit
+
+Final round **2026-08-29T040817Z-8db964057adf** reports:
+
+```json
+"surfaceExact": true, "surfaceKey": "groundSurface"
+```
+
+Terrain published, and the pattern-discovery path resolved it **without a line
+changing on this side** - which was the whole point of matching by key pattern over
+`serviceKeys()` rather than hard-coding a guessed name. Item 1 of the owed list is
+closed by someone else's commit, as intended.
+
+It also explains a diff I had briefly flagged. Comparing the default path against
+the pre-flag round showed 0.725% of pixels moved, and I had set an arbitrary
+2,000-pixel threshold that duly cried wolf. Splitting it by region: 8,900 of 10,434
+are outside the car and concentrated in rows 700-800, the foreground ground, and only
+81 are on the painted body. **The decal is now drawing on the exact rendered surface
+rather than the analytic field**, which is up to 23.6 mm different in the near field
+- so the ground-line pixels *should* have moved, and the body's should not have. The
+urgent fix is delivering, verified in pixels.
+
+The threshold is worth a word: a bare pixel count with a made-up bound is not a
+check. What made the result readable was partitioning by region and asking which
+region *ought* to have moved - the same discipline as splitting the nose histogram so
+the decal and the cap were attributed separately.

@@ -256,8 +256,17 @@ export function litterMaterial(): THREE.MeshStandardMaterial {
  * much lighter and yellower. Both are lit here, so these are albedos and run
  * higher than the unlit disc tones in `vegGround.ts`, which are pixel values.
  */
-const NEEDLE = new THREE.Color(0.105, 0.068, 0.040);
-const LEAF = new THREE.Color(0.228, 0.176, 0.098);
+/*
+ * Raised after the first close capture. At the original 0.105 these read as
+ * black hard-edged shards rather than as litter — an item standing proud of the
+ * ground in crown shade sees only a narrow slice of sky, so its albedo is very
+ * nearly the whole of its value, and against a sand about 0.4 an albedo of 0.1
+ * lands as a hole. Dry needle litter measures around 0.13-0.17 and bleaches
+ * upward with age; still well under the sand, which is what makes the skirt
+ * read as a darkening rather than as confetti.
+ */
+const NEEDLE = new THREE.Color(0.145, 0.100, 0.062);
+const LEAF = new THREE.Color(0.265, 0.208, 0.122);
 
 export function litterColour(duff: number, shade: number, out = new THREE.Color()): THREE.Color {
   out.copy(LEAF).lerp(NEEDLE, Math.max(0, Math.min(1, duff)));

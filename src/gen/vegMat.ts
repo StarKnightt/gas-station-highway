@@ -513,8 +513,32 @@ export function scatterSprigs(opts: SprigScatterOptions): Sprig[] {
   const half = Math.ceil(opts.radius / PITCH);
   const out: Sprig[] = [];
   const c = new THREE.Color();
-  const DRY = new THREE.Color(1.05, 0.98, 0.78);
-  const GREEN = new THREE.Color(0.76, 0.94, 0.72);
+  /*
+   * Albedos, and the previous values were not physical.
+   *
+   * These were (1.05, 0.98, 0.78) and (0.76, 0.94, 0.72) — the first reflects
+   * 105% of the red it receives. They reach the shader as `instanceColor`,
+   * which multiplies the material's diffuse, so they are reflectances and
+   * nothing downstream renormalises them.
+   *
+   * That mattered far more than a 5% overshoot, because `applyFoliageTransmission`
+   * multiplies its transmitted term by `diffuseColor.rgb`. The sprigs run
+   * `strength: 6.8` and `fill: 1.8`, the strongest in the project, and those
+   * figures were tuned on the pines, whose diffuse comes from a needle texture
+   * around 0.1. Reusing them against an albedo of 1.0 put the additive term
+   * several times sun radiance, and a 100 mm thatch star at ankle height
+   * clipped to flat white — visible as a scatter of white sparklers in the
+   * near foreground of `underpine`, in crown shade, which is where the term is
+   * deliberately not shadow-multiplied and therefore strongest.
+   *
+   * Cured grass and dry straw measure about 0.30-0.40 in the visible, warmer
+   * in red; a live blade is nearer 0.25-0.40 and peaks in green. The dawn glow
+   * the strength was tuned for still scales with albedo, which is the correct
+   * physics — if it now reads weak, that is a tuning question to settle with a
+   * measurement rather than by putting the reflectance back above one.
+   */
+  const DRY = new THREE.Color(0.44, 0.38, 0.24);
+  const GREEN = new THREE.Color(0.26, 0.36, 0.18);
 
   const radiusAt = (bearing: number) =>
     opts.radius * (1 + 0.15 * Math.sin(bearing * 1.9 - 0.4) + 0.09 * Math.sin(bearing * 4.7 + 2.2));

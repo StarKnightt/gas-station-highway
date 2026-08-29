@@ -42,7 +42,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { launchOptions, assertHardwareGpu } from "./gpu.mjs";
+import { launchOptions, assertHardwareGpu, assertSceneGpu } from "./gpu.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = path.join(ROOT, "shots", "film");
@@ -66,6 +66,16 @@ const WIDTH = opt("width", 1600);
 const HEIGHT = Math.round((WIDTH * 9) / 16);
 const MAX_SECONDS = opt("duration", 0);
 const WANT_AUDIO = !flag("no-audio");
+/**
+ * Screenshotting is ~95% of the wall time, and none of it is needed while
+ * working on where the route goes. `--no-capture` runs the identical simulation
+ * and reports the identical route in forty seconds instead of nine minutes.
+ *
+ * Module scope rather than local to `main()`, because the frame directory is
+ * cleared at the top of `main()` and has to know whether this run intends to
+ * refill it.
+ */
+const CAPTURE = !flag("no-capture");
 
 /**
  * The route, as a person would describe it.
@@ -97,19 +107,37 @@ const ROUTE = [
   { kind: "click", expect: "door", find: "entry-door-glass$", note: "the bell, and the leaf swings" },
   { kind: "hold", secs: 0.5, aim: [-6.05, 1.7, 34.5], note: "let it open" },
   { kind: "walk", to: [-6.05, 33.2], find: "cooler-door-glass-3", budget: 2.8, note: "over the threshold, into the light change" },
-  // Look down the shop at the cooler bank over the shelving. This is the shot
-  // that makes the cut legible: the destination is on screen before we cut to it.
-  { kind: "hold", secs: 1.3, find: "grab-bottle", note: "the cooler bank, down the shop" },
-  // And then cut, rather than walk. The shop cannot be crossed — both gondola
-  // runs span the door's line of travel and close off 0.70 m from the west wall,
-  // so the only route is 18.8 m round the east end to cover 5 m, which was 13 s
-  // of a 20 s film spent walking past shelving, and the body stuck in the 0.82 m
-  // gap by the till rather than threading it. That is the shop's layout, written
-  // up for Building in RESUME-PLAN.md. The film does not pretend otherwise: it
-  // cuts, which claims nothing about the ground in between.
-  // Facing the bank, on the aisle side. Without the face constraint the search
-  // took the roomiest spot on the ring, which was 66 deg round to the west.
-  { kind: "cut", stand: 1.5, find: "grab-bottle", face: [0, -1], note: "cut — at the drinks cooler" },
+  // Look down the shop at the cooler bank over the shelving. Whether the next
+  // beat walks or cuts, this shot is what makes it legible: the destination is
+  // on screen before the film either goes to it or arrives there.
+  //
+  // Aimed at the bank's illuminated sign band rather than at the bottle, and the
+  // one wide interior shot in the film. The interior is its weakest register —
+  // Building measures p50 181 inside against 82 outside, so the brief's
+  // door-opening contrast is currently inverted — so this points at the one thing
+  // in the room with contrast and legible type, and does not linger.
+  { kind: "hold", secs: 1.1, find: "grab-bottle", offset: [0, 0.85, 0], note: "the lit cooler bank, down the shop" },
+  // Walk to the cooler if walking is worth watching, and cut if it is not. 8 m is
+  // about 5.7 s at 1.400 m/s, which is as much of an 18 s film as an aisle can
+  // earn; the route to the cooler is currently ~18 m to cover ~5 m, so this will
+  // cut and say why until Building pulls gondola run B back. The budget is much
+  // larger than the threshold on purpose: a walk that is going to happen should
+  // be allowed to finish, and it is the measurement — not the budget expiring —
+  // that decides whether it happens.
+  //
+  // `face` keeps the stance on the aisle side of the bank. Without it the search
+  // took the roomiest spot on the ring, 66 deg round to the west, from where
+  // opening a leaf swung it across the line to the bottle.
+  {
+    kind: "walk",
+    stand: 1.05,
+    find: "grab-bottle",
+    face: [0, -1],
+    budget: 14.0,
+    cutIfOver: 8.0,
+    fovOnCut: 36,
+    note: "through the shop to the drinks cooler",
+  },
   // The holds aim above the bottle; only the clicks aim at it. The aisle in
   // front of the cooler bank is 1.09 m wide (gondola run B ends at z 37.55, the
   // bank starts at 38.64), so the camera can only be 0.6 m off a bottle sitting
@@ -133,6 +161,37 @@ const ROUTE = [
   { kind: "click", expect: "cooler", closest: "cooler-door-glass-\\d+$", note: "close it" },
   { kind: "hold", secs: 1.2, find: "grab-bottle", offset: [0, 0.32, 0], note: "settle" },
 ];
+
+/**
+ * Every property a beat is allowed to carry.
+ *
+ * Checked before the browser starts, because a beat key the executor does not
+ * read is silently ignored, and this route has now lost the same argument twice
+ * that way: `face` survived a revert on the beat but not in `stance()`'s
+ * signature, so the constraint that keeps the camera on the aisle side of the
+ * cooler bank was being dropped on the floor while the route still said it was
+ * there. Nothing failed — it just quietly stood somewhere else. That is the same
+ * shape as the filename that named a pose it was not at and the duplicate object
+ * key that hashed every grid cell to `undefined`: an assertion made by naming,
+ * checked nowhere. Two authors and a revert have edited this file, so the route
+ * now states its own vocabulary and refuses anything outside it.
+ */
+const BEAT_KEYS = new Set([
+  "kind", "note", "secs", "budget", "find", "offset", "aim", "to", "stand",
+  "face", "expect", "closest", "cutIfOver", "fovOnCut", "fov",
+]);
+for (const [i, beat] of ROUTE.entries()) {
+  const bad = Object.keys(beat).filter((k) => !BEAT_KEYS.has(k));
+  if (bad.length) {
+    throw new Error(`filmwalk: beat ${i} ("${beat.note}") has ${bad.map((b) => `"${b}"`).join(", ")}, which nothing reads`);
+  }
+  if (!["hold", "walk", "click", "cut"].includes(beat.kind)) {
+    throw new Error(`filmwalk: beat ${i} ("${beat.note}") has kind "${beat.kind}", which nothing executes`);
+  }
+  if (beat.face && !beat.stand) {
+    throw new Error(`filmwalk: beat ${i} ("${beat.note}") sets face but not stand, and face is only consulted while choosing a stance`);
+  }
+}
 
 const resources = { server: null, browser: null };
 async function shutdown() {
@@ -285,7 +344,7 @@ const DIRECTOR = `(() => {
      * is now — then takes the nearest such spot, so the walk is the short way
      * round rather than whichever way the author pictured.
      */
-    stance(target, distance) {
+    stance(target, distance, face) {
       const here = [cam.position.x, cam.position.z];
       /**
        * Is the view from a candidate stance to the target unobstructed?
@@ -353,6 +412,13 @@ const DIRECTOR = `(() => {
             for (let deg = 0; deg < 360; deg += 10) {
               const a = (deg * Math.PI) / 180;
               const c = [target[0] + Math.cos(a) * d, target[2] + Math.sin(a) * d];
+              // Which side of the thing to stand on, when the route knows and the
+              // geometry does not say. A clear view of a *closed* fridge is not a
+              // clear view of an open one: standing 66 deg off the cooler bank's
+              // normal put the leaf across the line to the bottle once it opened,
+              // so the grab clicked the leaf. Sight-testing cannot catch that,
+              // because at the moment it runs the door is still shut.
+              if (face && Math.cos(a) * face[0] + Math.sin(a) * face[1] < 0.55) continue;
               if (!D.free(c[0], c[1])) continue;
               if (requireSight && !sight(c, d)) continue;
               list.push({ at: c, from: Math.hypot(c[0] - here[0], c[1] - here[1]), stood: +d.toFixed(2) });
@@ -700,8 +766,17 @@ async function main() {
   const { build, preview } = await import("vite");
   const { chromium } = await import("playwright");
 
-  await fs.rm(FRAME_DIR, { recursive: true, force: true });
-  await fs.mkdir(FRAME_DIR, { recursive: true });
+  // Only clear the frames if this run is going to write frames. `--no-capture`
+  // exists to route and time the film in forty seconds instead of nine minutes,
+  // and two of those runs deleted a completed PNG sequence while producing
+  // nothing to replace it: the rm sat above the flag it should have been under,
+  // so the cheap diagnostic mode was the destructive one. Nothing was lost
+  // because the encode had already happened, which is the only reason this was
+  // an inconvenience rather than the deliverable.
+  if (CAPTURE) {
+    await fs.rm(FRAME_DIR, { recursive: true, force: true });
+    await fs.mkdir(FRAME_DIR, { recursive: true });
+  }
 
   const haveBuild = await fs
     .access(path.join(ROOT, BUILD_DIR, "index.html"))
@@ -812,13 +887,40 @@ async function main() {
   const maxFrames = MAX_SECONDS ? Math.round(MAX_SECONDS * FPS) : Infinity;
   const beats = [];
 
-  // Screenshotting is ~95% of the wall time, and none of it is needed while
-  // working on where the route goes. --no-capture runs the identical simulation
-  // and reports the identical route, in forty seconds instead of nine minutes.
-  const CAPTURE = !flag("no-capture");
+  /**
+   * One frame to disk, checked twice.
+   *
+   * A nine-minute take is a long time to be wrong about, and both of these
+   * failures are ones this project has already shipped once.
+   *
+   * The **dimension check** is because a valid PNG is not a valid frame: the
+   * harnesses here have written structurally perfect 0x0 PNGs and exited 0. The
+   * width and height live in the IHDR at a fixed offset, so 33 bytes read back
+   * per frame settles it, and a wrong size on frame 1 stops the run instead of
+   * being discovered in the encode.
+   *
+   * The **GPU recheck** is because `assertHardwareGpu` at launch answers a
+   * weaker question than it looks like it does. Playwright injects
+   * `--enable-unsafe-swiftshader` into every Chromium it starts, so a fallback
+   * to software rasterisation mid-take is possible and a startup-only check
+   * cannot see it; a context loss is worse, because the loop keeps running and
+   * every later frame is a stale copy of the last good one. Every 120 frames is
+   * four seconds of film — cheap against nine minutes, and it bounds how much
+   * of a take can be quietly counterfeit.
+   */
   const capture = async () => {
     if (CAPTURE) {
-      await page.screenshot({ path: path.join(FRAME_DIR, `f${String(frame).padStart(5, "0")}.png`), clip });
+      const file = path.join(FRAME_DIR, `f${String(frame).padStart(5, "0")}.png`);
+      await page.screenshot({ path: file, clip });
+      if (frame === 0 || frame % 120 === 119) {
+        const head = await fs.readFile(file).then((b) => b.subarray(0, 33));
+        const w = head.readUInt32BE(16);
+        const h = head.readUInt32BE(20);
+        if (w !== Math.round(clip.width) || h !== Math.round(clip.height)) {
+          throw new Error(`filmwalk: frame ${frame} is ${w}x${h}, expected ${clip.width}x${clip.height}`);
+        }
+        await assertSceneGpu(page, { tag: "film", when: `at frame ${frame} (t=${(frame / FPS).toFixed(2)}s)` });
+      }
     }
     frame++;
   };
@@ -901,7 +1003,7 @@ async function main() {
       // A `stand` beat picks its own destination from the scene: the ring at
       // that radius around the thing it is going to look at, nearest first.
       if (beat.stand) {
-        const s = await page.evaluate(([aim, d]) => window.__FILM.stance(aim, d), [beat.aim, beat.stand]);
+        const s = await page.evaluate(([aim, d, f]) => window.__FILM.stance(aim, d, f), [beat.aim, beat.stand, beat.face ?? null]);
         if (!s) {
           problems.push(`route: nowhere to stand ${beat.stand} m off ${beat.find} at t=${t0.toFixed(2)}s`);
           console.log(`  ${t0.toFixed(2)}s            ${beat.note.padEnd(46)} NO STANCE ${beat.stand} m off /${beat.find}/`);
@@ -935,6 +1037,47 @@ async function main() {
       ).len;
       const direct = Math.hypot(beat.to[0] - startedAt[0], beat.to[1] - startedAt[1]);
       console.log(`      planned ${planned.toFixed(1)} m over ${legs.length} leg${legs.length === 1 ? "" : "s"} to cover ${direct.toFixed(1)} m direct`);
+
+      /**
+       * Walk it if it is a walk; cut if it is a hike.
+       *
+       * This leg has been a cut and a walk in turn, and each time the choice was
+       * made by an author who believed something about the shop. The cut was
+       * written because the only route to the cooler was 18.8 m to cover 5 m. It
+       * was then changed to a walk on the strength of "Building aligned the aisle
+       * with the door and the store is reachable on foot" — but reachable is not
+       * the same claim. Building widened the *east detour* from 0.82 m to 1.15 m
+       * (`ISLAND.x0` -0.4 -> 0.15); `GONDOLA_X` is unchanged, so the runs still
+       * span x -8.2 to -1.0 across a door at x -6.0 and the route is still round
+       * the east end. Both authors were reasoning from a remembered fact rather
+       * than from the plan in front of them, and both would have been wrong again
+       * the next time the shop changed.
+       *
+       * So the route no longer decides. It states the longest walk that is worth
+       * watching, this measures the planned one on the live collision field, and
+       * it cuts only when the measurement says to. The day run B is pulled back
+       * this becomes a walk again with no edit, and if the aisle ever closes it
+       * becomes a cut again the same way.
+       */
+      if (beat.cutIfOver && planned > beat.cutIfOver) {
+        const at = await page.evaluate(([to, aim]) => window.__FILM.cutTo(to, aim), [beat.to, beat.aim]);
+        detail =
+          `CUT instead of walked — ${planned.toFixed(1)} m of route to cover ${direct.toFixed(1)} m, ` +
+          `over the ${beat.cutIfOver} m this shot is worth; now at (${at[0].toFixed(2)}, ${at[1].toFixed(2)})`;
+        problems.push(
+          `route: "${beat.note}" cut rather than walked — the planner needs ${planned.toFixed(1)} m ` +
+            `to cover ${direct.toFixed(1)} m, so the walk would be ${(planned / 1.4).toFixed(1)} s of film`
+        );
+        console.log(`      ${detail}`);
+        // A lens change is legitimate at a cut and nowhere else, so it is applied
+        // here rather than on the beat: if this leg walks, it keeps the lens the
+        // walk was shot on.
+        if (beat.fovOnCut) console.log(`      lens ${await page.evaluate(([f]) => window.__FILM.lens(f), [beat.fovOnCut])}\u00b0`);
+        await page.evaluate(async ([aim]) => { window.__FILM.look(aim, 60); await window.__FILM.step(); }, [beat.aim]);
+        await capture();
+        beats.push({ note: beat.note, t0, t1: frame / FPS, detail });
+        continue;
+      }
 
       const budget = Math.round(beat.budget * FPS);
       await page.evaluate(() => window.__FILM.key("keydown", "KeyW"));

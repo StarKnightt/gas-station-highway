@@ -7706,3 +7706,49 @@ feature was correct throughout. Worth recording because the cost of the wrong fi
 was high and specific - narrowing a 1 px line toward a physically-correct 4 mm gap
 would have taken it below one pixel and **deleted the shut lines entirely** while
 every geometry statistic improved.
+
+## 58. A 200 is not evidence that a file exists, and a dev server will tell you so
+
+While attributing an unexplained 404, `GET /favicon.svg` came back **200**, which
+reads unambiguously as "an icon already exists, so that is not the problem".
+
+There is no `favicon.svg` anywhere in the tree. The build directory contains
+exactly `index.html` and `assets/`. The 200 was the preview server's fallback
+handing back the HTML document for an unmatched path — so the probe that was
+meant to establish what exists had instead been told "yes" for a path that
+cannot exist.
+
+**Any dev or preview server with an SPA fallback answers 200 for infinitely many
+paths that are not files.** Checking existence over HTTP therefore proves nothing
+unless you also check *what came back*: a content type, a length, or the first
+bytes. `ls` the build directory instead, which cannot lie about this.
+
+The wider form is worth keeping because it recurs in this project: **a probe's
+"yes" is only as trustworthy as its ability to say "no".** A `canReach` that
+snapped to the nearest reachable cell could never return false; a `GET` against
+an SPA fallback can barely return 404. Both answer confidently and neither has
+the power to disagree with you.
+
+## 59. Elimination is an attribution only when the enumeration is complete, and it is still worth less than a reproduction
+
+The 404 above was attributed without ever being reproduced. The chain: the app
+contains no `fetch`, no `XMLHttpRequest`, no loader and no `.src =`, and four
+separate loads each recorded **exactly two requests, both 200** — so nothing in
+the page can 404, because nothing in it asks for anything. The browser's default
+`/favicon.ico` request does 404 at the server, and no icon was declared. Only one
+candidate remains.
+
+That is a much stronger position than the usual "it fits", because the
+enumeration is closed and mechanically verifiable: a request count of two, twice,
+is a complete inventory rather than a survey. Contrast the earlier retraction,
+where a mechanism fit a magnitude and nothing bounded the space of alternatives.
+
+**But it is still not a reproduction, and the write-up has to say so.** No probe
+run ever saw the 404: the icon fetch depends on tab state and the harness that
+recorded it opens two pages in one context where the probe opened one. The fix —
+an inline `data:` icon, which makes the request *impossible* rather than making
+it succeed — is verified by construction rather than by observing the 404 stop.
+
+Stating "attributed by elimination, not reproduced" costs one clause and tells
+the next reader exactly how much weight the claim carries. **The failure mode is
+not being wrong, it is being right in a way nobody can tell apart from a guess.**

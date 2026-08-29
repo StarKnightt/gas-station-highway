@@ -1890,9 +1890,8 @@ to be on a quiet machine.
 - **The store pinch point is fixed.** The cooler, store-mid and store-back are
   now reachable on foot at **every** radius tested including 0.34 m, against
   unreachable at 0.32 m when this was found. Building's fix works.
-- **One 404 during the run**: `Failed to load resource: 404 (Not Found)`. Not
-  chased and not attributed, but a 404 in the deliverable run is worth someone
-  naming before the take.
+- **One 404 during the run**: `Failed to load resource: 404 (Not Found)`. Chased
+  in §13.7 — it is the browser's default icon request, and it is fixed.
 
 ### 13.6 The map-channel gate is wired, and verified in the mode it runs in
 
@@ -1922,9 +1921,98 @@ One incidental observation from it: a dev-server load takes **~4 minutes**
 against ~25 s for a built bundle, because vite transforms on demand. Nobody
 should read a dev-mode load time as an init measurement.
 
+### 13.7 The 404, chased: the browser's own icon request
+
+**Fixed, in one line of `index.html`.** But the epistemic status matters, because
+it is an attribution by elimination and not by reproduction.
+
+What was verified:
+
+1. **The page makes exactly two requests, both 200** — the document and its JS
+   bundle — across four separate loads. The scene is entirely procedural: there
+   is not one `fetch`, `XMLHttpRequest`, `TextureLoader`, `AudioLoader` or
+   `.src =` in `src/`. **Nothing in this app can 404, because nothing in it asks
+   for anything.**
+2. **`GET /favicon.ico` returns 404** from the preview server.
+3. `index.html` declared no icon and there is no `public/` directory, so the
+   build contains no icon file. Chrome requests `/favicon.ico` by default when a
+   page declares none.
+
+So the only request that can produce a 404 is one the browser makes on its own.
+
+**What was not achieved: reproduction.** No probe run ever recorded the 404 —
+every attempt saw two requests, both 200. The favicon fetch depends on tab
+state, and the stress harness opens two pages in one context where the probe
+opened one. So the chain is: nothing else can 404, this can, and it does at the
+server. That is elimination, and it is worth less than a reproduction. It is
+reported as such.
+
+One correction against my own probe while chasing it: `GET /favicon.svg`
+returned **200**, which reads as "an icon already exists". It does not — there is
+no `favicon.svg` anywhere in the tree and the build directory contains only
+`index.html` and `assets/`, so the 200 is the preview server's fallback serving
+the HTML document. **A 200 for a path is not evidence the file exists.**
+
+The fix is an inline `data:` SVG icon in `index.html`, which makes the request
+impossible rather than making it succeed. **File touched: `index.html`** — shared,
+but the change is a `<link rel="icon">` in `<head>` with no effect on the scene.
+
+**Impact on the deliverable: none.** The request is cosmetic, happens once at
+load, and nothing renders from it — it could not stall a frame or leave anything
+unrendered. It was worth chasing to remove it from the list of unexplained
+things, not because it was dangerous.
+
+### 13.8 Init reliability is a separate risk, and it is larger than frametime
+
+Chasing the 404 turned up something worse, incidentally. Four cold loads of the
+same bundle, minutes apart, under contention:
+
+| Attempt | Outcome | Time |
+| --- | --- | --- |
+| (first probe) | **`Page crashed` on `page.goto`** | ~14 s |
+| 1 | **timed out waiting for ready** | 171.9 s |
+| 2 | ready | 30.9 s |
+| 3 | ready | 21.9 s |
+
+**One hard page crash and one 5–8× outlier in four loads.** The card had roughly
+4.6 GB free during the timeout, so that one is not VRAM exhaustion; init is ~25 s
+of mostly procedural CPU work and seven sibling agents were on the machine, so
+CPU contention stretching it is the obvious candidate — and, as everywhere else
+in this section, contention cannot be excluded from this host. Both faults match
+what two sibling agents independently reported.
+
+**This matters more than the frame-time question.** The deliverable is one
+continuous take that must survive init once, on the user's machine, with no
+second attempt — and a stutter can be re-shot while a failed init cannot be shot
+at all. So the quiet-host protocol now measures it explicitly: five cold loads,
+pass only at 5 of 5 with ready times inside 2× of the fastest
+(`QUIET-HOST-PROTOCOL.md` §2.1).
+
 ---
 
-## 14. Reproducing this
+## 14. The quiet-host protocol
+
+Written and **not run**: it needs an exclusive GPU window, which is the
+orchestrator's call. See `QUIET-HOST-PROTOCOL.md`.
+
+It is deliberately decision-free, because during that window there is nothing
+else running to answer a question with. It fixes in advance: the preconditions
+and the drift gate that decides whether the host is actually quiet; the single
+command (`--minutes=20 --park=120 --baseline=30000`, and **not** `--no-build`);
+the five conditions that void a run, including the parked-mean-above-walking-median
+inversion that voided every previous run; the pass criteria, with **frames over
+100 ms** as the deliverable criterion and 0 as the passing value; what the parked
+control must show for the walk to be interpretable at all; and the recurrence
+test that distinguishes a place from a moment, written around the mistake in
+§13.4 rather than trusting me not to repeat it.
+
+The control is 120 s rather than 20 s for a measured reason: the old 20 s window
+gave 929 frames, and at the walk's 0.78% rate of frames over 100 ms that window
+expects about seven, which is too few for its absence to carry weight.
+
+---
+
+## 15. Reproducing this
 
 ```bash
 node tools/perf.mjs --seconds=180              # baseline + three-minute leak walk
