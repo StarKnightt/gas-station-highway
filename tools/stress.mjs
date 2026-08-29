@@ -35,6 +35,7 @@ import net from "node:net";
 import { execFile } from "node:child_process";
 import { assertHardwareGpu, assertSceneGpu, launchOptions, isSoftwareRenderer } from "./gpu.mjs";
 import { assertPrivateBuildDir } from "./scratch.mjs";
+import { evaluateVoidConditions, formatVerdict } from "./voidcheck.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = 5152;
@@ -56,6 +57,10 @@ const PARK = Number(arg("park", "0")); // seconds of stationary control before w
 // Card sampled with nothing of ours running, to establish the host's own level
 // and its drift. Long enough to see the drift, short enough not to pad the run.
 const BASELINE_MS = Number(arg("baseline", "8000"));
+/* Marks a run as a harness rehearsal. Every number it produces is void by
+ * construction, and the verdict block says so, so that a rehearsal output found
+ * later in a log cannot be mistaken for a measurement. */
+const REHEARSAL = argv.includes("--rehearsal");
 const OUT_DIR = path.join(ROOT, "tools", "perf-out");
 
 /* ------------------------------------------------------------------ */
@@ -979,6 +984,15 @@ function print(o) {
     for (const r of o.reachByRadius) {
       line(`  radius ${r.radius.toFixed(2)} m   cooler ${r.cooler ? "reachable" : "NO"}   store-mid ${r.storeMid ? "reachable" : "NO"}   store-back ${r.storeBack ? "reachable" : "NO"}`);
     }
+    line();
+  }
+
+  /* The protocol's void conditions, evaluated rather than left for a reader to
+   * apply by eye from a markdown file. Printed first, because whether the run
+   * counts governs how every number below it may be read. */
+  {
+    const verdict = evaluateVoidConditions(o);
+    line(formatVerdict(verdict, { rehearsal: REHEARSAL }));
     line();
   }
 

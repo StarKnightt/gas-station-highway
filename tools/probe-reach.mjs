@@ -837,6 +837,8 @@ async function main() {
         const eyeAt = (x, z) => surface(x, z) + 1.65;
         const trace = [];
         const doorClicks = [];
+        /** Doors already actuated: the interaction is a toggle, so never twice. */
+        const actuated = new Set();
 
         key("keydown", "KeyW");
         let stalled = false;
@@ -856,13 +858,44 @@ async function main() {
               stalled = true;
               break;
             }
-            // A shut door is not a blocker, but a player would open it, and the
-            // approach shot has to. Open whatever the crosshair finds on the way.
+            /*
+             * A shut door is not a blocker, but a player would open it, and the
+             * approach shot has to. Open whatever the crosshair finds on the way —
+             * but **each door at most once**, because the interaction is a toggle.
+             *
+             * Without the guard this walked into its own second click: on a route
+             * that lingers near the jamb it re-probed the entry door and shut it,
+             * then stalled against a door it had opened itself. The report read
+             * `opened: entry-door at 1.52 m, at 0.10 m, at 0.22 m` — three
+             * openings of one door, which is one opening and two closings.
+             *
+             * It stayed hidden because the widest-path route passes the doorway
+             * once and keeps going, so the only route that could expose it was the
+             * direct one, which nothing walked until now.
+             */
             if (n % 30 === 0 && window.__INTERACT) {
               const hit = window.__INTERACT.probe();
-              if (hit && /door/i.test(hit.kind + hit.name) && hit.distance < 2.0) {
+              /*
+               * Only doors that stand *in the route*, which here means the entry
+               * door. The first version opened anything named "door" and, once
+               * the route was direct enough to pass close to the cooler bank, it
+               * opened two merchandise doors in passing and left their leaves
+               * across the aisle — so the grab then failed and the report read
+               * like an aisle-clearance defect. A walk harness must not actuate
+               * scenery it merely walks past; the cooler is opened deliberately,
+               * later, as part of the interaction being tested.
+               */
+              if (
+                hit &&
+                /entry/i.test(hit.name) &&
+                hit.distance < 2.0 &&
+                !actuated.has(hit.name)
+              ) {
                 const did = window.__INTERACT.click();
-                if (did) doorClicks.push(`${did.kind}:${did.name} at ${did.distance.toFixed(2)} m`);
+                if (did) {
+                  actuated.add(did.name);
+                  doorClicks.push(`${did.kind}:${did.name} at ${did.distance.toFixed(2)} m`);
+                }
               }
             }
           }
@@ -943,31 +976,115 @@ async function main() {
           for (let i = 0; i < 90; i++) await frame();
           await face();
 
-          // An opened leaf hinges to one side and swings out toward the player,
-          // so a sight line taken from in front of the hinge still passes through
-          // it: from 0.63 m the crosshair stayed on the door. Sidestep until the
-          // bottle is the nearest thing on the ray, which is what a player does
-          // and is bounded — one step each way, then give up and report.
+          /*
+           * Walk to the stance the geometry implies, rather than sidestepping
+           * until something works.
+           *
+           * The previous version stepped left and right until the crosshair
+           * found the bottle. That is a search, and searches of this shape are
+           * what `NOTES` case 53 is about: it wandered five metres away, reported
+           * a different number each time, and each report looked like a fresh
+           * aisle-clearance defect. The invariant across all of them was that the
+           * crosshair never named the bottle — which is a statement about where
+           * the harness was standing, not about the shop.
+           *
+           * The stance is derivable. The bottle is at a known x; an open leaf
+           * sweeps a slab in z in front of the cabinet; so stand square to the
+           * bottle at the far side of that slab. From there the bottle is about
+           * a metre away, inside the interaction range the same harness has
+           * already demonstrated at 1.35 m, and the leaf is not on the ray.
+           */
           const sidesteps = [];
-          // 60 frames is roughly 0.55 m. The first version used 22 and moved
-          // 0.2 m, which is less than half the leaf width and could not have
-          // cleared it either way.
-          for (const step of ["none", "KeyD", "KeyD", "KeyA", "KeyA", "KeyA", "KeyA"]) {
-            const hit = window.__INTERACT.probe();
-            if (hit && /bottle/i.test(hit.kind + hit.name)) break;
-            if (step === "none") continue;
-            key("keydown", step);
-            for (let i = 0; i < 60; i++) await frame();
-            key("keyup", step);
-            for (let i = 0; i < 10; i++) await frame();
-            await face();
-            sidesteps.push(
-              `${step}@(${cam.position.x.toFixed(2)},${cam.position.z.toFixed(2)})->` +
-                (window.__INTERACT.probe()?.name ?? "nothing")
-            );
+          /*
+           * The stance band, and it is 220 mm wide.
+           *
+           * Two constraints bracket it from opposite sides and neither is
+           * negotiable. Gondola run B's north face is at z 37.55, so a 0.32 m
+           * body cannot stand south of 37.87. An open cooler leaf sweeps the slab
+           * z 38.09–38.64, so the same body cannot stand north of 38.09. The
+           * intersection is **z 37.87 … 38.09**, and 37.98 is the middle of it.
+           *
+           * That is why no hand-chosen pose ever found it and why the close beat
+           * looked geometrically impossible: a 220 mm target inside a 1.09 m
+           * aisle is not something you land on by picking a round number. The
+           * first version of this used 37.70, which reads as "clear of the leaf"
+           * and is in fact inside the shelving.
+           */
+          const STANCE_Z = 37.98;
+          const standX = bottle.target[0];
+          for (let n = 0; n < 300; n++) {
+            const dx = standX - cam.position.x;
+            const dz = STANCE_Z - cam.position.z;
+            const d = Math.hypot(dx, dz);
+            if (d < 0.12) break;
+            // Steer by looking where we are going, then hold W: the same
+            // controller a player uses, not a teleport.
+            cam.lookAt(cam.position.x + dx, cam.position.y, cam.position.z + dz);
+            if (n === 0) key("keydown", "KeyW");
+            await frame();
           }
-          taken = window.__INTERACT.click();
+          key("keyup", "KeyW");
+          for (let i = 0; i < 12; i++) await frame();
+          await face();
+          sidesteps.push(
+            `walked to derived stance (${cam.position.x.toFixed(2)},${cam.position.z.toFixed(2)})->` +
+              (window.__INTERACT.probe()?.name ?? "nothing")
+          );
+          // Only click when the crosshair names the bottle. Clicking whatever is
+          // under it is how the previous run "took" a cooler door — which is a
+          // second toggle, so it closed the door it had just opened and reported
+          // a success.
+          const onBottle = window.__INTERACT.probe();
+          taken =
+            onBottle && /bottle/i.test(onBottle.kind + onBottle.name) ? window.__INTERACT.click() : null;
           window.__REACH_SIDESTEPS = sidesteps;
+
+          /*
+           * The close beat. The user's third interaction is open, grab, *close*,
+           * and the close is the half nobody has ever confirmed — a still capture
+           * cannot show it, and the walk stopped at the grab.
+           *
+           * It is a real geometric question, not a formality: the leaf swings
+           * into the aisle, so the stance that can reach the bottle may be inside
+           * the volume the leaf needs. Aim back at the door and ask the game's own
+           * picker, then click. If the crosshair cannot find the door from here,
+           * that is the finding.
+           */
+          if (taken) {
+            for (let i = 0; i < 20; i++) await frame();
+            let closeHit = null;
+            for (const back of [0, 1, 2]) {
+              if (back > 0) {
+                key("keydown", "KeyS");
+                for (let i = 0; i < 25; i++) await frame();
+                key("keyup", "KeyS");
+                for (let i = 0; i < 10; i++) await frame();
+              }
+              /*
+               * Aim down the bottle's own line, not at the cooler-door target.
+               * The target is the middle leaf of the bank; the leaf that is open
+               * is the one the bottle was behind. Aiming at the target closed a
+               * door three bays away — which is to say it *opened* one, since the
+               * interaction is a toggle, and then reported a success.
+               *
+               * Once the bottle has been taken, the next thing on the ray it
+               * occupied is exactly the leaf that was opened to reach it.
+               */
+              cam.lookAt(bottle.target[0], aimY(bottle), bottle.target[1]);
+              for (let i = 0; i < 6; i++) await frame();
+              const h = window.__INTERACT.probe();
+              if (h && /cooler|door/i.test(h.kind + h.name)) {
+                closeHit = {
+                  name: h.name,
+                  distance: Number(h.distance.toFixed(2)),
+                  steppedBack: back,
+                  from: [Number(cam.position.x.toFixed(2)), Number(cam.position.z.toFixed(2))],
+                };
+                break;
+              }
+            }
+            window.__REACH_CLOSE = closeHit ? { ...closeHit, closed: window.__INTERACT.click() } : null;
+          }
         }
 
         return {
@@ -975,6 +1092,7 @@ async function main() {
           opened,
           taken,
           sidesteps: window.__REACH_SIDESTEPS || [],
+          close: window.__REACH_CLOSE || null,
           finalStand: [Number(cam.position.x.toFixed(2)), Number(cam.position.z.toFixed(2))],
           stalled,
           waypoints: route.length,
@@ -999,6 +1117,15 @@ async function main() {
         `${w.finalDistance} m from the target`
     );
     if (w.doorClicks.length) console.log(`        opened on the way: ${w.doorClicks.join(", ")}`);
+    if (w.close) {
+      console.log(
+        `        closed the cooler: ${w.close.closed ? w.close.closed.name : "CLICK FAILED"} ` +
+          `at ${w.close.distance} m from (${w.close.from[0]}, ${w.close.from[1]})` +
+          (w.close.steppedBack ? `, after ${w.close.steppedBack} step(s) back` : ", from the grab stance")
+      );
+    } else if (w.taken) {
+      console.log("        close beat: NOT POSSIBLE — no stance reached could see the door");
+    }
     console.log(
       `        crosshair: ${w.probe ? `${w.probe.kind} "${w.probe.name}" at ${w.probe.distance.toFixed(2)} m` : "nothing"}`
     );

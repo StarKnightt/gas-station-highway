@@ -50,6 +50,27 @@ export interface SoilDetail {
    * shader by drainage and by a slow patchy dry-off, so it is not a flat tint.
    */
   wetBase?: number;
+  /**
+   * A rain shadow: a world-XZ rectangle under cover, where `wetBase` is reduced
+   * to `floor` rather than to zero.
+   *
+   * This exists because `wetBase` answers "what did the rain land on", and the
+   * honest answer for a forecourt is "not the part with a roof over it". A
+   * canopy deck 4.7 m up and 13 m across genuinely keeps its centre dry
+   * overnight, and the dry rectangle under a filling-station canopy with a wet
+   * apron around it is one of the most recognisable things a wet forecourt does.
+   *
+   * `floor` is deliberately not zero. Vehicles track water in on their tyres and
+   * wind-driven rain reaches some way under, so a hard dry rectangle would read
+   * as a decal — the same failure the pools had when they keyed on a binary mask.
+   * `softness` is the metres over which the transition happens, which is the
+   * wind-driven fringe and is what stops the edge being a straight line.
+   *
+   * Omitted means no shelter, and the uniforms then describe a degenerate rect
+   * that evaluates to "exposed" everywhere for any XZ. That matters: the arm has
+   * to be genuinely inert when unused, not merely small.
+   */
+  shelter?: { minX: number; maxX: number; minZ: number; maxZ: number; softness?: number; floor?: number };
   /** Debug: render the field's own channels to albedo (`?tforce=soilviz`). */
   viz?: boolean;
 }
@@ -266,6 +287,24 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
     U.uSoilWetFloor = { type: "float", value: soil.wetFloor ?? 0 };
     U.uSoilWetBase = { type: "float", value: soil.wetBase ?? 0 };
     U.uSoilViz = { type: "float", value: soil.viz ? 1 : 0 };
+
+    // Rain shadow. Packed (minX, minZ, maxX, maxZ) rather than the interface's
+    // field order, because the shader wants the two mins together to build a
+    // signed inset distance in two lines.
+    //
+    // The unused case is a degenerate rect at the origin with a floor of 1.0.
+    // That is inert for every XZ rather than nearly inert: the inset distance to
+    // a zero-area rect is -|p| which is at most zero, so the smoothstep returns
+    // zero and the factor is exactly 1.0 everywhere including at the origin.
+    const sh = soil.shelter;
+    U.uSoilShelter = {
+      type: "vec4",
+      value: sh ? new THREE.Vector4(sh.minX, sh.minZ, sh.maxX, sh.maxZ) : new THREE.Vector4(0, 0, 0, 0),
+    };
+    U.uSoilShelterK = {
+      type: "vec2",
+      value: new THREE.Vector2(sh ? (sh.softness ?? 2.2) : 1, sh ? (sh.floor ?? 0.25) : 1),
+    };
 
     // Four fixed slots rather than a GLSL array: `uniform vec4 name[4];` puts
     // the size after the name, which this table's one-line declaration cannot
@@ -712,7 +751,18 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
                // from the saturated ground beside it, so at zero depth every
                // water arm must equal what the ground was already doing. The
                // pool's whole contribution is graded from wdDepth downstream.
-               wdDamp = max(w, uSoilWetBase * uSoilWet * clamp((0.28 + 1.05 * dpatch) * dlow, 0.0, 1.0));
+               // The rain shadow, applied to the residual film and not to the
+               // pool. A roof stops rain landing; it does not drain a hollow
+               // that is already full, and scaling the pool by shelter would
+               // make standing water fade out under cover rather than simply
+               // not being there. In practice no pool is under the deck, so
+               // this is a correctness statement rather than a visible one.
+               float shIn = min(
+                 min(wxz.x - uSoilShelter.x, uSoilShelter.z - wxz.x),
+                 min(wxz.y - uSoilShelter.y, uSoilShelter.w - wxz.y)
+               );
+               float shelter = mix(1.0, uSoilShelterK.y, smoothstep(0.0, uSoilShelterK.x, shIn));
+               wdDamp = max(w, uSoilWetBase * uSoilWet * shelter * clamp((0.28 + 1.05 * dpatch) * dlow, 0.0, 1.0));
                return s;`
             : "wdDamp = 0.0; return vec4(0.5, 0.0, 0.0, 0.0);"
         }
@@ -990,7 +1040,26 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
              // instead of spreading it. Those two happening together is the
              // whole read of "it rained last night"; either alone is just a
              // different asphalt.
-             roughnessFactor = mix(roughnessFactor, 0.42, smoothstep(0.05, 0.55, wdDamp) * 0.75);
+             // The ramp's *reach*, corrected. The target of 0.42 is right for a
+             // damp hard surface and is unchanged; what was wrong was that it
+             // could not be got to. A ceiling of 0.75 on the blend, against a
+             // substrate at about 0.95, put full damp at 0.55 and ordinary
+             // apron damp - weight about 0.40 - at 0.74. Nothing concentrates a
+             // highlight at 0.74, so the frames had the darkening half of "it
+             // rained last night" and none of the specular half, which is the
+             // half that survives being looked at from eye height into a low
+             // sun.
+             //
+             // Raised to 1.0 rather than lowered in target because of what sets
+             // the roughness of a damp surface: once the film is continuous the
+             // microsurface being sampled is the water's, not the substrate's,
+             // so the correct behaviour is to *arrive* at the water value rather
+             // than to average with the stone forever. The low end is left
+             // gentle deliberately - a barely damp surface should barely change.
+             //
+             // Only the reach moved. The target is a second lever on the same
+             // quantity and moving both at once is how the pools became mercury.
+             roughnessFactor = mix(roughnessFactor, 0.42, smoothstep(0.05, 0.55, wdDamp));
              // Open water, now that there is a world to reflect. This was held
              // at 0.17 while scene.environment was sky plus a flat ground disc,
              // because a near-mirror with nothing in it but the sun returned one

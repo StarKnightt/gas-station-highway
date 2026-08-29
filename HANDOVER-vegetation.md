@@ -2345,3 +2345,115 @@ Ran on 5119 (`shoot6`) and 5147 (`probe-unseen`); 5147 because another agent hol
 Both confirmed to have no listener at exit. One orphaned `shoot6` from an earlier
 hung run was holding 5119 and had to be killed by PID; if a build fails to bind,
 check for a stale harness before assuming the port is someone else's.
+
+# Round: the crown pose, and what it found in the first frame
+
+## `underpine`: a new pose, and it was worth the whole round
+
+Added `underpine` to `tools/vegposes.mjs` as a new entry, nothing shared edited:
+eye height 1.6 m inside the west pine grove, aimed at ground 1.4 m from the
+centre of the 9.8 m pine at (-38.5, 19.5), inside its litter radius, camera 3.9 m
+off the trunk so the frame is ground rather than bark. Cross-lit at 6.2 degrees,
+because flat scatter and scatter with relief separate under raking light and are
+hard to tell apart under either of the other two.
+
+Aimed at published geometry rather than a guess: `debrisScatter.widestCrowns` now
+lists the five widest crown discs with positions, added for exactly this purpose.
+A pose aimed at a coordinate that happens to miss looks identical to a skirt that
+was never built, and I was not willing to add a ninth pose that could lie.
+
+The skirt moves **9167 px** here against a `nolitter` control from the same
+bundle, versus 294 in `edge` and 546 in `pines` — 31x — and reaches row 7, the
+ground at the lens. Both arms echoed their state (`sizeScale:1` / `force:[]` and
+`built:false, why:"vforce disabled the scatter"` / `force:["nolitter"]`).
+
+**The litter itself reads acceptably and the frame contains two defects it did not
+put there.** Judged as a photograph, the skirt is fine: a fine dark speckle that
+concentrates under the crown and thins outward. Its albedo was too low — at 0.105
+against a sand near 0.4, items standing proud in crown shade came out as black
+hard-edged shards, reading as holes rather than litter, and it is now 0.145 for
+needle and 0.265 for leaf, still well under the sand.
+
+## The white sparklers are the thatch sprigs, and this is the headline
+
+The first `underpine` frame has roughly fifteen **blown-out white star-bursts
+scattered across the near foreground**, at ankle height, in crown shade. In a
+photorealism project they read as bits of white plastic and they are the single
+worst thing in the frame — far worse than anything about the litter.
+
+Attribution proven, not assumed: they are absent under `?vforce=nosprig` with
+`force:["nosprig"]` echoed, and my litter flakes remain in that same frame. They
+are `veg-thatch-sprigs`, mine.
+
+Two real defects found, one fixed:
+
+- **`DRY` was `Color(1.05, 0.98, 0.78)` — a reflectance above 1.0.** It reaches
+  the shader as `instanceColor` and multiplies diffuse, so it is an albedo and
+  nothing renormalises it. Now (0.44, 0.38, 0.24), a real cured-grass figure,
+  with `GREEN` brought to (0.26, 0.36, 0.18) likewise.
+- **`strength: 6.8` and `fill: 1.8` were tuned on the pines and reused here.**
+  The shader multiplies the transmitted term by diffuse albedo, and the pines'
+  diffuse comes from a needle texture near 0.1, so the quantity actually tuned
+  was the product `strength * albedo`, about 0.7. Holding that product at the
+  sprigs' real albedo gives 1.6, and fill scales the same way to 0.45. Measured
+  effect, isolated: 2562 px, all darker, all ground rows, no crowns.
+
+**Still open, with the suspect named.** Neither fix clears the white cores. `fill`
+is deliberately not shadow-multiplied and it multiplies `uSunCol`, which is
+scene-referred sun radiance and well above 1 at dawn — so a sprig in full crown
+shade still receives `albedo * fill * uSunCol`, which clips on its own. That is
+precisely what the frame shows: the cores blow out *in shade*, where every
+shadowed term should be weakest. Bound the fill term against the sun radiance it
+is expressed as a fraction of. Do not lower it by feel.
+
+## RETRACTED: the transmission uniform leak, and how it nearly shipped
+
+I wrote a long note in `src/gen/vegTransmission.ts` asserting that the constant
+`customProgramCacheKey` leaks uniforms between foliage call sites, on this
+evidence: editing only the sprig call site changed 306622 px, 21% of the frame,
+including the pine crowns and the sky. Nothing in that call site can reach a pine,
+so it looked conclusive — and I had already reverted a correct fix on the strength
+of it.
+
+**It is false.** Another agent committed to `src/systems/LightingSystem.ts`
+between my two captures, at 09:49 against builds at 09:44 and 09:50. The diff was
+measuring their lighting change and attributing it to my edit. Isolating to two of
+my own rounds that straddle only my edit gives 2562 px, ground only. The retracted
+note is left in place as a retraction.
+
+The transferable hazard, and it is a sharp one in a tree several agents are
+editing: **a cross-round pixel diff attributes every concurrent edit to the last
+thing you touched, and it is most convincing exactly when the frame moves in a way
+your change could not possibly have caused.** That impossibility is the tell, and
+I read it backwards. Before believing a whole-frame move, check the mtimes of
+files you do not own. `find src -name "*.ts" -newermt <time>` takes a second and
+would have saved this round a wrong bug report and a wrong revert.
+
+## Void verdicts: my own backlog was the tool, and it is now clear
+
+`probe-unseen --verbose`, full scene: **`veg-scrub-grazed-far-0` is SEEN at 1925
+px**, and all 42 `veg-scrub-*` meshes are SEEN. The eight DEGENERATE far-scrub
+verdicts on my list were the instanced-aim bug and nothing else. No geometry work
+is needed and that round is cancelled.
+
+## For Car: an unstable mesh at the 0-px boundary
+
+Two consecutive full-scene `probe-unseen` runs on the same bundle disagree by one
+mesh: `car-system/car-contact-shadow` is OCCLUDED in one and SEEN in the other,
+while the tool's own determinism control reports 0 differing pixels across four
+re-rendered views. So it is genuinely marginal rather than noisy measurement. Any
+gate keyed on the exact OCCLUDED count is flaky by one because of it.
+
+## For Perf: the skirt's cost, named rather than pre-emptively cut
+
+13240 instances, 26480 triangles, one instanced draw, one material, no texture, no
+shadow-pass cost (`castShadow = false`). It adds 1 draw call and about 26.5k built
+triangles to a 718k scene. `budget` is 26000 items and `overBudget` is false, so
+the cap is real and reported rather than silently thinning. Not cutting it without
+a number from you.
+
+## For Terrain: the seam, unchanged
+
+Near foreground is still empty of litter in `edge` and `pines` and full of it in
+`underpine`, which is the expected signature of a skirt bounded by `underCrown`.
+Mine is under and around planting; the open near-field ground is yours.

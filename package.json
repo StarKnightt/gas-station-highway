@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "play": "vite build && vite preview --open",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",

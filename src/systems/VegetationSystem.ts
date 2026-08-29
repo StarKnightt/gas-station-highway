@@ -1496,14 +1496,57 @@ export class VegetationSystem implements GameSystem {
           sunColour: sunGlow,
           tint: transmitTint,
           wrap: 0.6,
-          // Stronger than the pines. A 100 mm blade of cured grass at a 6
-          // degree sun is one of the most strongly transmitting things in any
-          // landscape, and it is the reason a field at dawn has a glow at
-          // ankle height that no amount of reflected light reproduces.
-          strength: 6.8,
+          /*
+           * A 100 mm blade of cured grass at a 6 degree sun is one of the most
+           * strongly transmitting things in any landscape, and it is the reason
+           * a field at dawn has a glow at ankle height that no amount of
+           * reflected light reproduces. That argument still stands. The numbers
+           * that implemented it did not.
+           *
+           * These were 6.8 and 1.8, against a sprig albedo of 1.0, and the
+           * shader multiplies the transmitted term by the diffuse albedo. So
+           * the blade emitted nearly seven times the sun that hit it, and every
+           * sprig core clipped to flat white — a scatter of white sparklers
+           * across the near foreground of `underpine`. Lowering the albedo to a
+           * physical 0.44 alone did not clear it: the cores were more than a
+           * stop past the clip, so a 2.4x cut left them still white, which is
+           * how a genuine improvement can register 12105 changed pixels and
+           * look unfixed.
+           *
+           * The quantity the earlier round actually tuned was the product
+           * `strength * albedo`, measured on the pines, whose diffuse comes
+           * from a needle texture near 0.1: 6.8 * 0.1 is about 0.7. Holding
+           * that product at the sprigs' real albedo gives 0.7 / 0.44 = 1.6, and
+           * the fill term scales the same way. Measured effect, isolated to a
+           * pair of rounds straddling only this edit: 2562 pixels, all darker,
+           * all in the ground rows, no crown involvement.
+           *
+           * Together the two fixes take the brightest sprig pixel in `underpine`
+           * from luma 239 to 196, the count of near-white pixels (luma > 235)
+           * from 178 to zero, and the peak colour from (250,238,220), which is
+           * paper, to (226,191,151), which is straw.
+           *
+           * !! AND NOTE WHAT THAT MEASUREMENT SAYS ABOUT THE WORDS "BLOWN OUT".
+           * Not one pixel in either frame was ever clipped: zero at (255,255,255)
+           * and zero with any channel at 255, before the fix as well as after. I
+           * called these cores blown out from the screenshot, then reasoned from
+           * that premise to a specific mechanism — `fill` is not shadow-multiplied
+           * and multiplies scene-referred sun radiance, so a sprig in shade
+           * receives `albedo * fill * uSunCol` and clips unaided — and it was a
+           * good story fitted to a misread. Nothing exceeded 1. The defect was
+           * real and both numbers were wrong for real reasons, but it was a
+           * reflectance and contrast error, not a radiance bound, and those two
+           * want opposite fixes.
+           *
+           * A bright warm pixel beside shaded dirt and a clipped one are the same
+           * pixel in review. `tmp/hotpx.mjs` separates them in a second by
+           * printing channel values, and reading it before theorising would have
+           * saved two captures and one wrong entry in this file.
+           */
+          strength: 1.6,
           falloff: 2.6,
           broad: 0.6,
-          fill: 1.8,
+          fill: 0.45,
         }
       );
     const im = new THREE.InstancedMesh(geo, mat, sprigs.length);

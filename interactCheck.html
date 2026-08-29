@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dawn Station — interaction check</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0b0a0c; }
+      canvas { display: block; width: 100%; height: 100%; }
+      #hud { position: fixed; inset: 0; display: none; }
+      #loading {
+        position: fixed; inset: 0; display: grid; place-items: center;
+        font: 500 14px ui-sans-serif, system-ui, sans-serif; color: #a9998a; background: #0b0a0c;
+      }
+      #loading.done { display: none; }
+    </style>
+  </head>
+  <body>
+    <div id="loading">generating surfaces&hellip;</div>
+    <div id="hud" class="hidden"></div>
+    <script type="module" src="/src/interactCheck.ts"></script>
+  </body>
+</html>

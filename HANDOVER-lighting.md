@@ -24,7 +24,60 @@ attributed. Written up as NOTES 43.
 its output still exists immediately before every `page.goto` and throws with the
 cause named, so at least it fails honestly from here.
 
-## PCSS promotion: not yet, and the reason is my own standard
+## CONTACT HARDENING IS NOW DEFAULT — proven, then promoted
+
+**`?pcss=0` opts out.** This changes what every agent renders against: shadows
+are now sharp at contact and soften with distance instead of using one constant
+filter width.
+
+Proven on a purpose-built rig, `?lpost=1` with pose `post_penumbra`
+(`src/systems/lightPostRig.ts`), round `2026-08-29T040752Z-f7600160bab5`. One
+1.5 m post, 25 cm radius, standing on a high-albedo pad, its shadow running 13.8 m
+across open apron. Both arms in **one build and one browser**, and the arms are
+proven distinct in pixels before anything was read from them: 38.45% of channels
+differ, max delta 94.
+
+Image-space penumbra width down the shadow, seven matched rows, **both edges
+measured independently as replicates**:
+
+| | PCF | PCSS |
+| --- | --- | --- |
+| left edge, near → far | 8.7 → 6.7 px | 8.8 → 12.6 px |
+| right edge, near → far | 8.8 → 6.9 px | 8.8 → 15.1 px |
+
+**PCF's own trend is the perspective control**: a constant world-space kernel
+*must* shrink in image space as it recedes, and it does, 23%. PCSS grows instead,
+and the width ratio spans 1.89x on one edge and 2.19x on the other while crossing
+1.0. Some edges sharpened and others softened, and **a change of kernel width
+moves every edge the same way**. Edge contrast was flat at 19–25 luma levels
+across the whole span, so it is not a contrast artefact.
+
+That settles the question left open at n=2 with a sign flip. The mechanism is
+contact hardening, not a softer filter, so the name is now earned and the
+promotion is on the mechanism rather than on the net improvement.
+
+### Two things the rig itself taught, both physics I should have front-run
+
+1. **Horizontal ground is the worst possible penumbra receiver at a 6.2° sun.**
+   It takes sin(6.2) = 10.8% of the beam, so ambient dominates and lit-versus-
+   shadow is a small absolute difference on dark asphalt. The first attempt
+   measured edge contrasts of 33 falling to 6 and produced a meaningless flat
+   ratio. A high-albedo pad fixed it without touching the geometry, since
+   penumbra width is purely geometric.
+2. **A thin post cannot be used to measure a long penumbra.** A post of radius R
+   has no umbra beyond R/tan(θ) — the limb penumbrae overlap and the shadow fades
+   out. At 6 cm that is 3.2 m of an 11 m shadow, so the far rows came back
+   "faint": *the measurement was being defeated by the effect it was measuring.*
+   25 cm buys an umbra to 13.5 m.
+
+Also worth recording as a tool trap: with an x-window spanning **both** shadow
+edges, `penumbra.mjs` reported `unmatched dx≈30` at the far rows, and 30 px was
+the shadow's own width — as PCSS softened one edge the other became the steepest
+and the fit jumped across. Narrowing the window to one edge turned seven
+"unmatched" rows into seven matched ones with no re-render. The tool was right to
+refuse; the window was wrong.
+
+## Superseded: the case for holding PCSS back
 
 Perf's `BasicShadowMap` branch is real and verified in source — `shadowMemory.ts:237`
 now admits it and line 249 names my flag. With my own −23% on the artefact and

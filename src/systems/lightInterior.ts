@@ -177,8 +177,25 @@ export interface InteriorParams {
     floorY: number;
     roofY: number;
   };
-  /** Multiplier used by the forced-value diff (`?lforce=nofluoro` / `fluoro6`). */
+  /**
+   * Multiplier on the *daylight* terms: the doorway rect, the door bounce and
+   * the door glow. Used by the forced-value diff (`?lforce=nofluoro` /
+   * `fluoro6`).
+   */
   gain: number;
+  /**
+   * Multiplier on the *lamp* terms only: the ceiling fluorescents, their up
+   * light, and the cooler tubes with their emissive surfaces. `?lamp=<n>`.
+   *
+   * Split out from `gain` because one scalar over both made the brief's central
+   * effect impossible to reach. The deliverable asks for "the sunlight contrast
+   * as the door opens", and measurement says the room is currently the brighter
+   * side of that contrast: interior p50 181 against exterior 82, with the lamps
+   * supplying 71% of the interior frame (`?lforce=nofluoro` takes
+   * `interior_cold` from 129.9 to 37.7 mean luma). Turning `gain` down took the
+   * doorway down with the lamps, which is the one term that has to survive.
+   */
+  lampGain: number;
   /** False (`?lforce=clearglass`) leaves the glazing perfectly transmissive. */
   glazingShadow: boolean;
 }
@@ -280,7 +297,7 @@ export function buildInteriorLighting(p: InteriorParams): InteriorBuild {
     // RectAreaLight emits from the face its local -Z points at, and
     // Object3D.lookAt aims -Z at the target for lights. So looking at a point
     // directly below the fixture makes it a downlight.
-    const light = new THREE.RectAreaLight(FLUORESCENT, 13.0 * p.gain, w - 0.03, l - 0.03);
+    const light = new THREE.RectAreaLight(FLUORESCENT, 13.0 * p.lampGain, w - 0.03, l - 0.03);
     light.position.copy(pos);
     light.lookAt(pos.x, pos.y - 1, pos.z);
     light.name = `${anchor.name}-rect`;
@@ -289,7 +306,7 @@ export function buildInteriorLighting(p: InteriorParams): InteriorBuild {
 
     // A lay-in troffer also throws a little light up into the plenum through
     // the gap round the pan; without it the ceiling grid reads as a flat print.
-    const up = new THREE.PointLight(FLUORESCENT, 0.5 * p.gain, 2.6, 2);
+    const up = new THREE.PointLight(FLUORESCENT, 0.5 * p.lampGain, 2.6, 2);
     up.position.set(pos.x, pos.y + 0.18, pos.z);
     group.add(up);
   }
@@ -305,7 +322,7 @@ export function buildInteriorLighting(p: InteriorParams): InteriorBuild {
 
     for (const w of world) {
       const geo = new THREE.CylinderGeometry(0.017, 0.017, tubeLen, 10, 1);
-      const tube = new THREE.Mesh(geo, lampMaterial(COOLER_LAMP, 5.5 * p.gain));
+      const tube = new THREE.Mesh(geo, lampMaterial(COOLER_LAMP, 5.5 * p.lampGain));
       tube.position.copy(w);
       tube.name = "cooler-lamp-tube";
       group.add(tube);
@@ -317,7 +334,7 @@ export function buildInteriorLighting(p: InteriorParams): InteriorBuild {
     const yc = world[0].y;
     for (let i = 0; i < 3; i++) {
       const cx = THREE.MathUtils.lerp(x0, x1, (i + 0.5) / 3);
-      const light = new THREE.RectAreaLight(COOLER_LAMP, 7.0 * p.gain, (x1 - x0) / 3, tubeLen);
+      const light = new THREE.RectAreaLight(COOLER_LAMP, 7.0 * p.lampGain, (x1 - x0) / 3, tubeLen);
       light.position.set(cx, yc, zc - 0.02);
       // Cooler tubes sit behind the mullions firing back into the cabinet, so
       // the light the customer sees is bounce off the liner, not the lamp.

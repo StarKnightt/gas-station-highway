@@ -1229,3 +1229,59 @@ Gravel, litter, curbs, islands and slabs all cast and should keep casting: the
 shadow is why 15-90 mm debris reads at all at this sun elevation. If cascade
 budget needs recovering, the free end is the **far** cascades, where a 40 mm stone
 casts a sub-pixel shadow.
+
+## From Terrain: surfaces under cover can now declare a rain shadow
+
+`SoilDetail` in `src/gen/worldDetail.ts` takes an optional `shelter` rect:
+
+    shelter?: { minX, maxX, minZ, maxZ, softness?, floor? }
+
+It reduces the residual damp film — the "it rained last night" term — to `floor`
+inside the rect, over `softness` metres of transition, and leaves standing water
+alone. Defaults: `softness` 2.4 m, `floor` 0.3.
+
+Terrain uses it for the forecourt, taking the rect straight from `CANOPY` in
+`src/gen/canopyParts.ts` rather than copying the numbers, so the dry patch cannot
+drift out of register with the roof casting it. The deck is x ±6.6 by z
+13.1–26.7 inside a forecourt of x ±11.6 by z 12.4–27.2, which leaves a 5 m wet
+apron east and west and almost none north or south.
+
+**Why anyone else might want it.** Any surface with something over it has this:
+the store's eaves overhang, the canopy soffit, a projecting sign, a fuel tanker's
+footprint. `floor` is deliberately not zero — tyres and shoes track water in and
+wind-driven rain reaches a couple of metres under a 4.7 m deck, so a hard dry
+rectangle reads as a decal in the same way the pools did when they keyed on a
+binary mask. If you want a dry strip under an overhang on ground you own, this is
+the mechanism; if you want one on ground Terrain owns, say where and it is two
+lines.
+
+**Two general findings from the round that produced it**, both in `NOTES.md`:
+
+- The forecourt had **no wet treatment at all** until this round, because the
+  brief says "wet asphalt" and the feature was scoped to the material named
+  rather than to the situation. `pools` lives inside `soil`, so one absent
+  options block removed the damp film, the standing water, the waterline and the
+  sheen together, silently. **Check whether your feature is on the surface the
+  camera occupies or only on the surface the requirement was phrased about.**
+- Every water pose in the harness was aimed at known water, so none of them could
+  survey. **A pose authored from the feature list can confirm or deny; only a
+  pose authored from the camera path can discover.** Two `walk_by` poses at eye
+  height and ordinary field of view, looking along the film's actual walk, found
+  this in one frame. Car reached the same conclusion independently this hour.
+
+## ALL SYSTEMS: an unrecognised harness flag must be an error, not a default
+
+`tools/shoot1.mjs` silently ignored `--force=nowet` (correct spelling
+`--query=tforce=nowet`) and produced a round byte-identical to default, which was
+about to be read as a control arm proving a feature did nothing. The argument
+reader matched a literal `--name=` prefix and returned the fallback otherwise, so
+a *correctly spelt value behind a wrongly spelt flag* defeated the existing
+unknown-token check.
+
+`shoot1` now rejects any argument it does not implement. If your harness reads
+argv by prefix match, it has this bug. It is the third instrument this session
+whose result was predetermined by construction.
+
+What caught it: the harness prints its active force tokens in its own stats line,
+so `"tforce":[]` appeared in a round that should have had one. **Print the state
+the run is in, not the state it was asked for.**

@@ -634,7 +634,11 @@ export class LightingSystem implements GameSystem {
       return;
     }
 
+    // `nofluoro` and `fluoro6` still move both, so every existing ablation and
+    // every sibling's saved comparison keeps its old meaning. `?lamp=` is the
+    // new lever and it moves the lamps alone.
     const gain = this.force.nofluoro ? 0 : this.force.fluoro6 ? 6 : 1;
+    const lampGain = this.force.nofluoro ? 0 : this.force.fluoro6 ? 6 : num("lamp", 1);
     const build = buildInteriorLighting({
       buildingRoot: root,
       glazingShadow: !this.force.clearglass,
@@ -644,6 +648,7 @@ export class LightingSystem implements GameSystem {
       entryDoor: game.tryGet<THREE.Object3D>("building.entryDoor") ?? null,
       footprint,
       gain,
+      lampGain,
     });
     scene.add(build.group);
     this.interior = build;

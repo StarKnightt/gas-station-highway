@@ -56,6 +56,22 @@ const SYSTEM = arg("system", "system6");
 const QUERY = arg("query", "");
 const SUFFIX = arg("suffix", "");
 const ONLY = arg("shots", "").split(",").filter(Boolean);
+/**
+ * `--ab=<query>` captures both arms of a comparison inside one process.
+ *
+ * Adopted from the pumps harness after a cross-round diff in this system
+ * produced a confident, entirely false finding. Two arms shot as separate runs
+ * are separated by a rebuild, and six agents commit continuously, so the diff
+ * measures every edit anyone made in between and attributes all of it to yours.
+ * It is most convincing exactly when it should be least believed: this system
+ * "measured" a sprig-only edit moving the pine crowns and the sky, wrote it up
+ * as a shared-uniform leak, and reverted a correct fix — the real cause was
+ * another agent touching LightingSystem between the builds.
+ *
+ * One build, one preview, one browser, two pages. Nothing in `src/` can change
+ * between the arms because no rebuild happens between them.
+ */
+const AB = arg("ab", "");
 const DO_BUILD = !argv.includes("--no-build");
 const ALLOW_SOFTWARE = argv.includes("--allow-software");
 const LENIENT = argv.includes("--lenient");
@@ -304,7 +320,21 @@ async function main() {
   const failures = [];
   let reported = false;
 
+  /*
+   * The arms. With no `--ab` this is a single arm and the loop below is exactly
+   * the old behaviour, same filenames and all.
+   */
+  const ARMS = AB
+    ? [
+        { query: QUERY, suffix: SUFFIX, label: "A" },
+        { query: [QUERY, AB].filter(Boolean).join("&"), suffix: `${SUFFIX}_ab`, label: "B" },
+      ]
+    : [{ query: QUERY, suffix: SUFFIX, label: null }];
+  /** Per-shot record of what each arm echoed, so the pair can be checked. */
+  const armEcho = new Map();
+
   for (const shot of SHOTS) {
+   for (const arm of ARMS) {
     const pose = POSES[shot];
     const page = await context.newPage();
     const problems = [];
@@ -317,7 +347,7 @@ async function main() {
     // `shot=system6` is not a preset any system claims, so PlayerSystem
     // disables its controller and leaves the camera to the pose below.
     const parts = ["shot=system6", "gpu=1"];
-    if (QUERY) parts.push(QUERY);
+    if (arm.query) parts.push(arm.query);
     const url = `${base}?${parts.join("&")}`;
     const t0 = Date.now();
     await page.goto(url, { waitUntil: "load", timeout: 60_000 });
@@ -333,10 +363,24 @@ async function main() {
       );
     }
 
-    if (!reported) {
-      reported = true;
+    {
       const veg = await page.evaluate(() => window.__VEGETATION ?? null);
+      // Recorded for every arm, printed for the first. The record is what makes
+      // an A/B pair checkable rather than merely captured: an arm whose flag
+      // silently failed to apply produces two identical frames and a diff of
+      // zero, which reads as "no effect" and is the failure this whole flag
+      // exists to prevent.
+      if (arm.label) {
+        armEcho.set(`${shot}:${arm.label}`, {
+          force: veg?.force ?? null,
+          scatter: veg?.debrisScatter?.built ?? null,
+          sizeScale: veg?.debrisScatter?.sizeScale ?? null,
+        });
+      }
+      if (!reported) {
+      reported = true;
       console.log(`[shoot6] __VEGETATION: ${JSON.stringify(veg)}`);
+      }
       if (!veg) failures.push("window.__VEGETATION was never published — VegetationSystem did not run");
       else if (!LENIENT) {
         const need = ["horizonTriangles", "pines", "foliageCards", "clumps", "poles", "fencePosts"];
@@ -419,11 +463,11 @@ async function main() {
       );
     }
 
-    const file = await round.save(`${shot}${SUFFIX}`, (dest) => page.screenshot({ path: dest, type: "png" }));
+    const file = await round.save(`${shot}${arm.suffix}`, (dest) => page.screenshot({ path: dest, type: "png" }));
     written.push(file);
     const lit = await assertFrameIsLit(file, shot, failures);
     console.log(
-      `[shoot6] ${shot.padEnd(9)} -> ${path.relative(ROOT, file)}  eye y=${applied.y.toFixed(2)}  ` +
+      `[shoot6] ${(arm.label ? `${shot}[${arm.label}]` : shot).padEnd(9)} -> ${path.relative(ROOT, file)}  eye y=${applied.y.toFixed(2)}  ` +
         `draws=${stats?.calls ?? "?"} tris=${stats?.tris ?? "?"}  ` +
         `gpu=${/NVIDIA|RTX/i.test(liveGpu) ? "hw" : liveGpu}  ` +
         `sky=${lit.skyMean.toFixed(0)} low=${lit.lowMean.toFixed(0)} black=${lit.darkPct.toFixed(0)}%  ` +
@@ -440,6 +484,36 @@ async function main() {
       );
     if (problems.length) console.warn(`[shoot6]   page problems:\n    ${problems.slice(0, 8).join("\n    ")}`);
     await page.close();
+   }
+  }
+
+  /*
+   * The pair check. Both arms came from one build in one browser, so the bundle
+   * is identical by construction rather than by assertion — but "the flag was
+   * applied" is not, and that is the half that has actually failed here before.
+   * If the two arms echo the same state, the B arm did nothing and any diff
+   * taken from the pair measures noise while looking like a clean negative.
+   */
+  if (AB) {
+    console.log(`\n[shoot6] A/B pairs, one bundle ${stamp.text}, arms differ only by "${AB}":`);
+    for (const shot of SHOTS) {
+      const a = armEcho.get(`${shot}:A`);
+      const b = armEcho.get(`${shot}:B`);
+      if (!a || !b) {
+        failures.push(`${shot}: A/B requested but one arm never echoed __VEGETATION`);
+        continue;
+      }
+      const sa = JSON.stringify(a);
+      const sb = JSON.stringify(b);
+      console.log(`[shoot6]   ${shot.padEnd(9)} A ${sa}`);
+      console.log(`[shoot6]   ${" ".repeat(9)} B ${sb}`);
+      if (sa === sb) {
+        failures.push(
+          `${shot}: the B arm echoed the same state as A, so "${AB}" changed nothing in the scene. ` +
+            `Any diff from this pair is noise. Check the token is one VegetationSystem parses.`
+        );
+      }
+    }
   }
 
   await context.close();

@@ -9,6 +9,11 @@ import { applyWorldDetail } from "../gen/worldDetail";
 import { makeSoilField } from "../gen/groundSoil";
 import { makeAccumField, type GroundAccum } from "../gen/groundAccum";
 import { makeRng } from "../gen/noise";
+// The canopy deck footprint, for the forecourt's rain shadow. Imported from the
+// module CanopySystem builds its geometry from, so the dry patch cannot drift
+// out of register with the roof casting it, and read at module scope so there is
+// no dependency on whether Canopy has initialised yet.
+import { CANOPY } from "../gen/canopyParts";
 import {
   DRIVEWAYS,
   FORECOURT,
@@ -75,6 +80,16 @@ const TFORCE_TOKENS = [
    * question from thin gravel and Perf wants the second one.
    */
   "thindebris",
+  /**
+   * The canopy rain shadow off, so the forecourt is uniformly damp.
+   *
+   * This is the control for the dry patch specifically, separate from `nowet`.
+   * `nowet` answers "is any of the wet arm reaching the forecourt", which was
+   * the original question; this answers "is the dry rectangle the thing doing
+   * the work", which is a different question and would otherwise be untestable
+   * because both arms move the same pixels.
+   */
+  "noshelter",
 ] as const;
 type TForce = Record<(typeof TFORCE_TOKENS)[number], boolean>;
 
@@ -488,6 +503,58 @@ export class TerrainSystem implements GameSystem {
       washGain: 0.8,
       overlayGain: 1.0,
       overlayTint: new THREE.Color(0x15120f),
+      /**
+       * The forecourt gets the wet vocabulary, which until now it did not have
+       * at all.
+       *
+       * This was a pure absence and the way it survived is worth stating. The
+       * brief says "wet asphalt", so the wet arm was built on the asphalt
+       * material and read as done; `pools` live inside `soil`, so a material
+       * with no `soil` block has no damp film, no standing water, no waterline
+       * and no sheen; and all three water poses were aimed at LOW_SPOTS, which
+       * are on asphalt and dirt. Nothing stood on the forecourt and looked along
+       * it until the walking pose did, and the forecourt is the bottom third of
+       * most of the film.
+       *
+       * `wetBase` is above asphalt's 0.34 despite concrete drying faster,
+       * because what is being set is the visible swing rather than the water. A
+       * damp dielectric drops roughly a third of its diffuse albedo either way,
+       * and a third of concrete's 0.35 is a change the eye reads easily where a
+       * third of asphalt's 0.09 is a few levels.
+       *
+       * `gain` is lower than asphalt's 0.28: the drainage and disturbance arms
+       * are authored for soil, and staining reads as neglect on a poured slab in
+       * a way it does not on a bituminous surface.
+       */
+      soil: {
+        ...soilCommon,
+        gain: TF.nosoil ? 0 : 0.2,
+        wetBase: TF.nowet ? 0 : 0.42,
+        /**
+         * The canopy deck is a roof, so the middle of the forecourt did not get
+         * rained on. CANOPY is imported rather than copied: CanopySystem builds
+         * its geometry from the same constant, so the dry patch cannot drift out
+         * of register with the thing casting it.
+         *
+         * The deck is x +/-6.6 by z 13.1..26.7 inside a forecourt of x +/-11.6
+         * by z 12.4..27.2, which leaves a 5 m wet apron east and west and almost
+         * nothing north and south. That asymmetry is free large-scale value
+         * variation of exactly the kind the frames were missing, and it is
+         * organised by a real object rather than by noise.
+         */
+        shelter: TF.noshelter
+          ? undefined
+          : {
+              minX: CANOPY.minX,
+              maxX: CANOPY.maxX,
+              minZ: CANOPY.minZ,
+              maxZ: CANOPY.maxZ,
+              // Wind-driven rain reaches a couple of metres under a 4.7 m deck.
+              softness: 2.4,
+              // Not zero: tyres track water in off the apron all night.
+              floor: 0.3,
+            },
+      },
     };
     applyWorldDetail(concrete, { key: "concrete", ...concreteDetail });
 

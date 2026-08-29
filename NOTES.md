@@ -7752,3 +7752,177 @@ it succeed — is verified by construction rather than by observing the 404 stop
 Stating "attributed by elimination, not reproduced" costs one clause and tells
 the next reader exactly how much weight the claim carries. **The failure mode is
 not being wrong, it is being right in a way nobody can tell apart from a guess.**
+
+---
+
+## 45. Three ways a purpose-built measurement rig defeats itself, and the physics you must do before building one
+
+Built an isolated-post rig to settle whether contact-hardening shadows actually
+harden with distance. It took four rounds, and the first three failed for reasons
+that were all predictable from the sun elevation alone. **At a 6.2 degree sun,
+low-angle geometry dominates every measurement decision, and none of these were
+instrument bugs — the rig was physically incapable of the measurement.**
+
+### 1. Horizontal ground is the worst available receiver at a low sun
+
+A horizontal surface takes `sin(6.2) = 10.8%` of the beam, so on flat ground the
+ambient dominates and lit-versus-shadow is a small absolute difference sitting on
+a dark asphalt albedo. Measured edge contrasts came out at 33 luma levels falling
+to 6, the fits were noise, and the ratio was flat and meaningless.
+
+Fixed with a high-albedo pad under the shadow. **This biases nothing**, because
+penumbra width is purely geometric — albedo scales the absolute contrast without
+touching the edge position. The same argument says a *vertical* sun-facing
+receiver would be better still, at 9.2x the irradiance of ground.
+
+### 2. A thin occluder cannot cast a long measurable penumbra
+
+An occluder of radius R has **no umbra at all** beyond `R / tan(theta)`, because
+past that distance the penumbrae from opposite limbs of the sun overlap and the
+shadow fades to nothing. At the project's 0.0185 rad sun a 6 cm post gives an
+umbra 3.2 m down an 11 m shadow, and every row past that returned "faint".
+
+**The measurement was being defeated by the effect it was measuring** — a wider
+penumbra is exactly what destroys the contrast the fit needs. Widening the post
+to 25 cm buys an umbra to 13.5 m. Compute this *before* choosing the geometry.
+
+### 3. A measurement window spanning two edges will silently swap between them
+
+`penumbra.mjs` reported `unmatched dx≈30` on the far rows, and 30 px was the
+shadow's own width: as one edge softened, the *other* edge became the steepest
+feature in the window and the fit jumped across. Narrowing the window to a single
+edge turned seven unmatched rows into seven matched ones **with no re-render**.
+
+Worth noting the tool behaved correctly — it refused rather than reporting a
+number, which is why this cost minutes instead of a wrong conclusion. The window
+was wrong, not the instrument. Measure one feature per window.
+
+### The control that made the result trustworthy
+
+Both arms in one build and one browser, and **the arms were proven distinct in
+pixels before anything was read from them**: 38.45% of channels differing, max
+delta 94. An earlier attempt had produced a perfectly flat ratio, and the natural
+reading was "the treatments are equivalent"; the actual cause was that a single
+report block in the log came from one arm, so the flag state of the other arm was
+simply unknown. A whole-frame diff answers "was it applied" in one line and
+cannot be confounded by which arm got logged.
+
+### And the shape of the positive result
+
+The comparison arm's own trend was the control. A constant world-space kernel
+**must** shrink in image space as it recedes, and PCF did, by 23%. PCSS grew
+instead, and the ratio crossed 1.0 — some edges sharpened while others softened.
+**A change of kernel width moves every edge the same way, so a crossing cannot be
+produced by "softer" or "sharper" and is specific to distance-dependence.** Design
+comparisons so the wrong hypothesis predicts a *different sign*, not a smaller
+magnitude.
+
+## 60. A feature named after a material gets built on that material, and the camera stands somewhere else
+
+*(Numbering in this file has collided several times — there are two 55s and a
+second 45. Treat the titles as the identifiers.)*
+
+The brief says "wet asphalt from last night's rain". So the wet arm — damp film,
+standing water, waterline, sheen — was built on the asphalt material, verified in
+pixels, and reported as landed. It was landed. It was also entirely absent from
+the concrete forecourt, which is the bottom third of most of an 18-second walk,
+and which is the surface a person at this station actually stands on.
+
+Three things had to line up for that to survive several rounds:
+
+1. **The feature was scoped to the noun in the brief.** "Wet asphalt" is a
+   material plus a state, and only the state was the requirement. The lot was
+   rained on; so was the forecourt, the kerb, the island tops and the walk.
+2. **One missing options block removed four features at once.** `pools` lives
+   inside `soil`, so a material with no `soil` block has no damp film *and* no
+   standing water *and* no waterline *and* no wet sheen. Nested optional config
+   fails in bulk and reports nothing, because absent is a legal value.
+3. **Every pose that examined water was aimed at water.** `puddle`, `rim` and
+   `fringe` all point at `LOW_SPOTS`, which are on asphalt and dirt. A pose
+   authored to inspect a feature is authored from knowledge of where the feature
+   is, so it cannot discover where the feature is not.
+
+The general form: **a pose that knows what it is looking for can only confirm or
+deny it, never survey.** The defect was found within one frame of adding a pose
+authored from the *camera path* instead of from the feature list — eye height,
+ordinary lens, looking along the walk. Ask of every system: what surface is under
+the camera for most of the deliverable, and has that surface got the feature, or
+only the surface the requirement was phrased about?
+
+## 61. In `mix(a, b, w)` the reviewable number is `b` and the operative number is `w`
+
+The wet roughness arm read:
+
+    roughnessFactor = mix(roughnessFactor, 0.42, smoothstep(0.05, 0.55, wdDamp) * 0.75);
+
+The 0.42 is correct. It is the right roughness for a damp hard surface, it is
+what the comment explains, and it is the number any reader — including its
+author, twice — takes away as what the surface becomes when wet.
+
+The surface never got near it. The substrate sits near 0.95, the blend weight is
+capped at 0.75, and ordinary apron damp produces a weight near 0.40, so the
+achieved roughness was **0.74** and full damp reached only 0.55. Nothing
+concentrates a highlight at 0.74. The frames therefore had the darkening half of
+"it rained last night" and none of the specular half — and the specular half is
+the half that survives being seen from eye height into a low sun, because that is
+the geometry where Fresnel is strongest.
+
+**A ceiling on a blend weight makes the target aspirational, and the target is the
+only part of the expression that gets read.** The failure is invisible in review
+because every symbol is individually defensible: the target is physically right,
+the smoothstep bounds are sensible, and the 0.75 looks like ordinary restraint.
+Only the composition is wrong, and composition is what nobody evaluates.
+
+The check is one line of arithmetic and it should be routine wherever a `mix`
+implements a physical transition: **substitute the realistic input, not the
+extreme one, and print the achieved value.** `wdDamp` is about 0.34 on the apron,
+not 1.0, so 1.0 was never the case to reason about.
+
+Note what the fix was *not*. Lowering 0.42 would also have produced more sheen,
+and it was the wrong knob: the reach was broken, so the target was innocent.
+Fixing the visible symptom through the innocent parameter would have left the
+ceiling in place, made the pool a mirror as a side effect, and buried the real
+defect under a tuning value that now looks deliberate. Two levers on one quantity,
+one of them broken — establish which is broken before you move either.
+
+## 62. A term that is not shadowed changes the mean and the spread independently, and the eye reports the mean
+
+Having given the forecourt its wet arm, the first frame looked to me like the
+raking shadows had washed out — which would have been a serious regression, since
+the long-shadow composition is one of the few things a critic has protected. The
+reasoning was sound: an environment reflection is unshadowed by construction, the
+shadow map gates only the sun, so adding sheen lifts shadowed pixels and flattens
+relief.
+
+Measured, the nearest band's contrast had **more than doubled**, p90-p10 from
+19.4 to 45.0. Nothing had washed out. Brighter overall and higher contrast at the
+same time, and the eye reported the first and inferred the second.
+
+**A mean cannot distinguish "brighter" from "flatter" and neither can looking.**
+The statistic that separates them is a spread — here p90-p10 within a band of
+constant depth, because at a low sun each band is nearly bimodal between sun and
+shadow, so the percentiles land on the two modes. The two subsequent changes both
+raised p90 while leaving p10 within a level, which is the signature of a specular
+highlight and could not have been produced by a tint; a tint moves both ends.
+
+So: **a suspected loss of contrast is a measurable claim, and it is cheap.** I was
+one command from being wrong in the direction of reverting a good change.
+
+### And a control arm that could not have failed, again
+
+While establishing the above I passed `--force=nowet` to the capture harness. The
+correct spelling is `--query=tforce=nowet`. The harness's argument reader matches
+the literal prefix `--name=` and returns the fallback otherwise, so the flag was
+silently ignored and the round was byte-identical to default — a round I was about
+to read as a control arm showing wetness doing nothing.
+
+This is the third instrument this session whose result was predetermined by
+construction, and the first where the *value* was spelt correctly and the *flag
+name* was wrong, which the existing unknown-token check could not see. The fix is
+to reject every argument the harness does not implement, including well-formed
+ones. **An unrecognised flag must be an error and not a default**, because the
+default of a control arm is the thing it is controlling against.
+
+What caught it was an unrelated habit: the harness prints the active force tokens
+in its own stats line, so `"tforce":[]` appeared in a round that was supposed to
+have one. **Print the state a run is in, not the state it was asked for.**

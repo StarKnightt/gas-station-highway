@@ -52,6 +52,41 @@ const DO_BUILD = !argv.includes("--no-build");
 const ALLOW_SOFTWARE = argv.includes("--allow-software");
 
 /**
+ * Reject any flag this harness does not implement.
+ *
+ * `arg()` matches on the literal prefix `--name=`, so a flag passed in any other
+ * form silently returns its fallback. That is not a typo guard: two forms of the
+ * same mistake cost real time in one round. `--shots walk_store` with a space
+ * captured all ten poses instead of two, and `--force=nowet` — a plausible name
+ * for a flag that is actually spelt `--query=tforce=nowet` — produced a round
+ * that was byte-for-byte the default and was about to be read as a control arm
+ * showing the feature doing nothing.
+ *
+ * That second one is the dangerous one, and it is NOTES.md 43 in a new costume:
+ * a control that cannot fail certifies whatever it is pointed at. The value
+ * `nowet` was spelt correctly and the flag name was wrong, so the existing
+ * unknown-pose check could not see it.
+ */
+{
+  const KNOWN_VALUE = ["system", "query", "suffix", "shots"];
+  const KNOWN_BARE = ["no-build", "allow-software"];
+  const bad = argv.filter((a) => {
+    if (!a.startsWith("--")) return true;
+    const body = a.slice(2);
+    const eq = body.indexOf("=");
+    if (eq < 0) return !KNOWN_BARE.includes(body);
+    return !KNOWN_VALUE.includes(body.slice(0, eq));
+  });
+  if (bad.length) {
+    console.error(`[shoot1] unrecognised argument(s): ${bad.join(" ")}`);
+    console.error(`[shoot1] flags taking a value (require '='): ${KNOWN_VALUE.map((k) => `--${k}=`).join(" ")}`);
+    console.error(`[shoot1] flags taking none: ${KNOWN_BARE.map((k) => `--${k}`).join(" ")}`);
+    console.error(`[shoot1] to force a control arm use --query=tforce=<token> --suffix=_<token>`);
+    process.exit(2);
+  }
+}
+
+/**
  * `eye` is metres above the walkable surface at the camera's XZ.
  *
  * The sun is at azimuth 203.4 degrees and about 6 degrees of elevation, so the

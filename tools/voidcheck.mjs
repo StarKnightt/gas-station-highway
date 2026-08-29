@@ -83,18 +83,27 @@ export function evaluateVoidConditions(out) {
   );
 
   /* 3. Another process released memory mid-run, so no delta is readable. A phase
-   *    cannot use less than the host used before we existed. */
-  const belowBaseline = phases?.filter((p) => num(p.minMiB) && p.minMiB < vram.baseMeanMiB) ?? [];
+   *    cannot use less than the host used before we existed.
+   *
+   *    The `baseline` phase is excluded, and it has to be: the baseline mean is
+   *    the mean *of that phase*, so its own minimum is below it by construction
+   *    unless every sample was identical. §4.1.3 as originally written ("any
+   *    card phase") therefore fired on literally every run, which the clean-run
+   *    control in the test caught — a gate that always fires is worse than no
+   *    gate, because it gets switched off. Only phases after launch can be
+   *    compared against the baseline. */
+  const afterLaunch = phases?.filter((p) => p.phase !== "baseline") ?? [];
+  const belowBaseline = afterLaunch.filter((p) => num(p.minMiB) && p.minMiB < vram.baseMeanMiB);
   decide(
     3,
     "phase minimum below baseline",
-    !!phases?.length && num(vram?.baseMeanMiB),
+    !!afterLaunch.length && num(vram?.baseMeanMiB),
     belowBaseline.length > 0,
     belowBaseline.length
       ? `${belowBaseline.map((p) => `${p.phase} min ${p.minMiB} MiB`).join(", ")} vs baseline mean ${vram.baseMeanMiB.toFixed(0)} MiB`
-      : phases?.length
-        ? "every phase stayed at or above the baseline mean"
-        : "no VRAM phases were sampled"
+      : afterLaunch.length
+        ? `every post-launch phase stayed at or above the ${vram.baseMeanMiB?.toFixed(0)} MiB baseline mean`
+        : "no post-launch VRAM phases were sampled"
   );
 
   /* 4. The inversion that voided every previous run: a static frame cannot cost
@@ -130,30 +139,81 @@ export function evaluateVoidConditions(out) {
 }
 
 /**
- * §2.1: five cold loads, all reaching ready, spread within 2× of the fastest.
+ * §2.1: cold loads. Every load must reach ready, and the *repeat* loads must be
+ * consistent with each other.
  *
- * @param loads `[{ outcome: "ready" | ..., secs: number }]`
+ * ## Why the first load is scored separately
+ *
+ * Rehearsing this found a pattern that changes what the criterion should be.
+ * Across three independent sequences on a contended host, **the first load was
+ * the worst every time**: 218.7 s against 20.8 s and 21.3 s; 171.9 s (timing
+ * out) against 30.9 s and 21.9 s; and a hard crash on the first attempt of the
+ * sequence before that. Three for three is not the shape of random contention.
+ *
+ * If first-load cost is systematic, then a flat "spread within 2×" rule fails on
+ * every run for a reason that is not a harness fault — and worse, it would
+ * report the single most deliverable-relevant number in this whole document as
+ * noise. **The user's run is a first load.** The ~21 s init everyone quotes is
+ * the warm figure.
+ *
+ * So: `pass` requires every load to reach ready, and the spread limit applies to
+ * loads 2..N, which are genuinely comparable to each other. The first load's
+ * absolute time and its ratio to the rest are returned as `firstLoad` and
+ * `firstLoadRatio` — reported prominently, never folded into a spread.
+ *
+ * @param loads `[{ outcome: "ready" | ..., secs: number }]`, in order.
  */
 export function evaluateColdLoads(loads, expected = 5) {
   const ready = loads.filter((l) => l.outcome === "ready");
-  const times = ready.map((l) => Number(l.secs)).filter(num);
-  const fastest = times.length ? Math.min(...times) : null;
-  const slowest = times.length ? Math.max(...times) : null;
-  const ratio = fastest ? slowest / fastest : null;
   const problems = [];
+
   if (loads.length !== expected) problems.push(`${loads.length} loads attempted, expected ${expected}`);
   if (ready.length !== loads.length)
-    problems.push(`${loads.length - ready.length} of ${loads.length} did not reach ready: ${loads.filter((l) => l.outcome !== "ready").map((l) => l.outcome).join(", ")}`);
+    problems.push(
+      `${loads.length - ready.length} of ${loads.length} did not reach ready: ` +
+        loads.filter((l) => l.outcome !== "ready").map((l) => `#${l.attempt ?? "?"} ${l.outcome}`).join(", ")
+    );
+
+  const firstLoad = loads.length && loads[0].outcome === "ready" && num(Number(loads[0].secs)) ? Number(loads[0].secs) : null;
+
+  // Repeats only: the first load is a different measurement, not an outlier.
+  const repeats = ready.slice(loads.length && loads[0].outcome === "ready" ? 1 : 0).map((l) => Number(l.secs)).filter(num);
+  const fastest = repeats.length ? Math.min(...repeats) : null;
+  const slowest = repeats.length ? Math.max(...repeats) : null;
+  const ratio = fastest ? slowest / fastest : null;
   if (ratio !== null && ratio > LIMITS.coldLoadSpreadRatio)
-    problems.push(`ready times spread ${ratio.toFixed(1)}x (${fastest}s to ${slowest}s), limit ${LIMITS.coldLoadSpreadRatio}x`);
-  return { pass: problems.length === 0, problems, readyCount: ready.length, fastest, slowest, ratio };
+    problems.push(`repeat loads spread ${ratio.toFixed(1)}x (${fastest}s to ${slowest}s), limit ${LIMITS.coldLoadSpreadRatio}x`);
+
+  const medianRepeat = repeats.length ? [...repeats].sort((a, b) => a - b)[Math.floor(repeats.length / 2)] : null;
+  const firstLoadRatio = firstLoad !== null && medianRepeat ? firstLoad / medianRepeat : null;
+
+  return {
+    pass: problems.length === 0,
+    problems,
+    readyCount: ready.length,
+    firstLoad,
+    firstLoadRatio,
+    medianRepeat,
+    fastest,
+    slowest,
+    ratio,
+  };
 }
 
 /** Human-readable verdict, for the harness to print at the end of a run. */
 export function formatVerdict(result, { rehearsal = false } = {}) {
   const lines = [];
   lines.push(`--- protocol verdict (QUIET-HOST-PROTOCOL.md §4.1) ---`);
-  for (const c of result.checked) lines.push(`  ok       ${c.id}. ${c.title}: ${c.detail}`);
+  // Only conditions that did NOT fire may print as ok. `checked` deliberately
+  // contains every evaluated condition including the violated ones, so that the
+  // completeness of the evaluation can be asserted — but printing those as `ok`
+  // put an "ok" line above the matching "VOID" line for the same condition, and
+  // a reader skimming five ok lines would have stopped there.
+  const firedIds = new Set(result.fired.map((f) => f.id));
+  for (const c of result.checked) {
+    if (firedIds.has(c.id)) continue;
+    lines.push(`  ok       ${c.id}. ${c.title}: ${c.detail}`);
+  }
   for (const u of result.undecidable) lines.push(`  UNKNOWN  ${u.id}. ${u.title}: ${u.why}`);
   for (const f of result.fired) lines.push(`  VOID     ${f.id}. ${f.title}: ${f.detail}`);
   lines.push("");

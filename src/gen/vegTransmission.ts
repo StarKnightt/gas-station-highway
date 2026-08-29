@@ -229,6 +229,24 @@ export function applyFoliageTransmission<T extends THREE.Material>(
   // The general test, worth remembering next time a cache key is written: a
   // value belongs in `customProgramCacheKey` if and only if changing it changes
   // the *text* handed to `compile`. A uniform never does.
+  //
+  // A leak between call sites was suspected here on 2026-08-29 and it is NOT
+  // real. Retracted rather than deleted, because the way it was nearly believed
+  // is the useful part:
+  //
+  // Editing only the thatch-sprig call site appeared to change 306622 pixels,
+  // 21% of the frame, including the pine crowns and the sky — which no sprig can
+  // reach, and which reads as damning evidence of shared uniforms. Another agent
+  // committed to `src/systems/LightingSystem.ts` between the two captures. The
+  // diff was measuring their change, not mine. Isolating properly — comparing
+  // two of my own rounds that straddle only my edit — puts the true effect at
+  // 2562 pixels, entirely in the ground rows, with no crown involvement at all.
+  //
+  // So the rule above stands, and the general hazard is a cross-round pixel diff
+  // in a shared tree: it silently attributes every concurrent edit to the last
+  // thing you touched, and it is most convincing when the frame moves in a way
+  // your change could not possibly cause. Diff rounds that straddle one edit, and
+  // check the mtimes of files you do not own before believing a whole-frame move.
   mat.customProgramCacheKey = () => "foliage-transmission-v2";
   mat.needsUpdate = true;
   return mat;

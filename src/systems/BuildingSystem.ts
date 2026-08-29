@@ -135,7 +135,23 @@ const COUNTER = { x0: 0.5, x1: 3.15, z0: 34.55, z1: 35.45, height: 0.98 };
 
 /** Gondola spine positions. 2.35 m apart gives a real 1.19 m shopping aisle. */
 const GONDOLA_Z = [34.6, 36.95];
-const GONDOLA_X = { x0: -8.2, x1: -1.0, halfDepth: 0.6 };
+/**
+ * The runs stop 0.65 m short of where they used to at the west end, and the
+ * reason is a route rather than a look.
+ *
+ * At `x0: -8.2` both runs left 0.70 m to the west wall. That is wider than a
+ * 0.64 m body, so every reachability test passed it, and it is 30 mm of margin —
+ * which is not a corridor, it is a scrape. Measured with a clearance-constrained
+ * shortest path, the only interior route to the cooler threaded that gap and the
+ * doorway corner at 13 mm, and the walked controller stuck at the jamb rather
+ * than follow it. The shop was passable and not crossable, and those are
+ * different properties.
+ *
+ * `x0: -7.55` opens the west corridor to 1.35 m. It costs 0.65 m of the 7.2 m
+ * run; the critic asked that the *density* of shelving read through the glass be
+ * protected, not its length, and the stocking is unchanged.
+ */
+const GONDOLA_X = { x0: -7.55, x1: -1.0, halfDepth: 0.6 };
 
 /**
  * The impulse island in front of the counter. One constant because the geometry
