@@ -57,40 +57,260 @@ export interface TransmissionOptions {
 }
 
 /**
- * Installs the terms on a material and returns it. Safe to call on a material
- * that is shared between meshes; the uniforms are per-material.
+ * Vertex-stage wind.
+ *
+ * Studied from `c:\Code\jungle-trail` (`src/world/vegetation.js`), which is the
+ * user's own earlier project and the bar they have twice held this one against.
+ * Three of its decisions are carried over because each of them is the answer to
+ * a way this can look wrong rather than a matter of taste:
+ *
+ *  - **Displace in world space, not object space.** Every card here is randomly
+ *    yawed by its instance matrix, so an object-space push sends each one a
+ *    different way and the crown shimmers instead of leaning. One world
+ *    direction, and the whole crown moves as air moving through it.
+ *  - **Phase from world position.** That is what buys variation across
+ *    instances for free. Identical motion on 12,269 cards would look worse than
+ *    stillness, and the alternative — a per-instance attribute — is not
+ *    available: Perf's quality lever asserts that no vegetation mesh carries a
+ *    custom instanced attribute, and it thins meshes by permuting
+ *    `instanceMatrix`.
+ *  - **Amplitude as the square of a cantilever coordinate.** A real shoot bends
+ *    with its base fixed; a linear ramp slides the whole card and reads as a
+ *    texture scrolling.
+ *
+ * The gust is a slow wave travelling across the site rather than a global
+ * multiplier, so a gust arrives, crosses the frame and passes. That is the part
+ * that reads as air rather than as vertex animation, and it costs one more
+ * `sin`.
+ *
+ * Deliberately *not* carried over: jungle-trail's third harmonic at 4.6 rad/s,
+ * and most of its amplitude. Its understory is a rainforest in a breeze; this
+ * is a wet pine lot at 6.2 degrees of sun after a night of rain, and a visible
+ * sway would contradict the standing water, the long shadows and the silence.
  */
-export function applyFoliageTransmission<T extends THREE.Material>(
-  mat: T,
-  opts: TransmissionOptions
-): T {
-  const wrap = opts.wrap ?? 0.55;
-  const strength = opts.strength ?? 1.5;
-  const falloff = opts.falloff ?? 3.5;
-  const broad = opts.broad ?? 0.45;
-  const fill = opts.fill ?? 0.5;
+export interface FoliageWindOptions {
+  /**
+   * Peak excursion of a tip vertex, metres, in world space.
+   *
+   * Authored against `WIND.strength`; see `WIND_AUTHORED_AT` at the call site.
+   * These are small on purpose: 25 mm at a pine tip 13 m up is about one pixel
+   * of travel at 20 m, which is the "barely perceptible" the brief asks for.
+   */
+  amplitude: number;
+  /**
+   * Object-space distance from the instance origin at which a vertex counts as
+   * a tip. Everything at the origin is anchored and does not move at all.
+   *
+   * Object space rather than world, because the instance matrices carry
+   * non-uniform scale and a world-space reach would make a large clump limp and
+   * a small one stiff. The geometry's own bounding radius is the right number
+   * and it is known on the CPU.
+   */
+  reach: number;
+  /** Shared clock, seconds. Shared *by reference* so one write drives every material. */
+  time: { value: number };
+  /**
+   * Shared `?vegwind=` scale, shared by reference.
+   *
+   * A scale rather than a toggle, and that is what makes the term verifiable.
+   * At shipping amplitude a working wind and a dead wind are indistinguishable
+   * in a still frame, so `?vegwind=8` is the only arm that can prove the
+   * displacement is wired and that the shadows follow it. At 0 every product
+   * below contains an exact zero, so the null arm is bit-identical to no wind —
+   * which is what makes the first registered prediction meaningful.
+   */
+  gain: { value: number };
+  /** Unit XZ. The direction the wind blows *toward*, in the sense `site.WIND` documents. */
+  direction: THREE.Vector2;
+}
 
-  const uniforms = {
-    uSunDir: { value: opts.sun.clone().normalize() },
-    uSunCol: { value: opts.sunColour.clone() },
-    uTransTint: { value: opts.tint.clone() },
-    uWrap: { value: wrap },
-    uTransStrength: { value: strength },
-    uTransFalloff: { value: falloff },
-    uTransBroad: { value: broad },
-    uCanopyFill: { value: fill },
-  };
+export interface FoliageExtras {
+  wind?: FoliageWindOptions;
+  /**
+   * Mip-driven minification damping. Beauty pass only — see the note where it
+   * is injected for why the depth pass deliberately does not get it.
+   *
+   * The number is the atlas width in pixels, which is what turns a UV
+   * derivative into a texel footprint.
+   */
+  dampAtlasPx?: number;
+  /**
+   * `?vegdamp=` scale, shared by reference. Same argument as the wind gain: a
+   * uniform rather than a compile branch, so the control arm and the shipping
+   * build run the same program and a diff between them is a diff of pixels.
+   * 0 is an exact identity — `vegFar` becomes zero everywhere, which is the
+   * state the near field is already in.
+   */
+  dampGain?: { value: number };
+}
+
+/**
+ * Everything that gets injected into a foliage material, installed through one
+ * `onBeforeCompile`.
+ *
+ * The single assignment is the load-bearing part. `onBeforeCompile` is a plain
+ * property, so a second `mat.onBeforeCompile = ...` anywhere would silently
+ * delete whatever was there before — the material still compiles, still renders
+ * and quietly loses the largest visual feature in the vegetation. Composition
+ * has to be structural rather than remembered, so there is exactly one place in
+ * this file that assigns it and every term is a branch inside it.
+ */
+function installFoliagePatch<T extends THREE.Material>(
+  mat: T,
+  parts: { transmission?: TransmissionOptions; extras?: FoliageExtras }
+): T {
+  const opts = parts.transmission;
+  const wind = parts.extras?.wind;
+  const atlasPx = parts.extras?.dampAtlasPx;
+
+  const windUniforms = wind
+    ? {
+      uVegWindTime: wind.time,
+      uVegWindGain: wind.gain,
+      uVegWindAmp: { value: wind.amplitude },
+      uVegWindReach: { value: Math.max(1e-4, wind.reach) },
+      uVegWindDir: { value: wind.direction.clone().normalize() },
+    }
+    : {};
+  const dampUniforms = atlasPx
+    ? {
+      uVegAtlasPx: { value: atlasPx },
+      uVegDampGain: parts.extras?.dampGain ?? { value: 1 },
+    }
+    : {};
+  // Built once per material rather than per compile: `onBeforeCompile` can run
+  // again after a `needsUpdate`, and a fresh uniform object each time would
+  // orphan any handle another system had taken on the old one.
+  const transUniforms = opts ? transmissionUniforms(opts) : {};
+
+  /* Chunk order is the whole argument for where this lands, and getting it
+   * wrong is silent in both directions.
+   *
+   * three's vertex order is
+   *   begin_vertex -> morphtarget -> skinning -> displacementmap
+   *   -> project_vertex -> logdepthbuf -> ... -> worldpos_vertex
+   *
+   * `project_vertex` is where `instanceMatrix` and `modelMatrix` are applied
+   * and where `gl_Position` is written, so it is the LAST point at which a
+   * displacement still reaches the rasteriser and the FIRST at which a world
+   * position exists for an instanced card. Anything injected after it moves
+   * nothing — the vertex-stage twin of the mistake recorded below, where a
+   * scene-referred radiance was added after tone mapping and four rounds of
+   * raising its strength did nothing.
+   *
+   * `worldpos_vertex` is then fed the displaced position rather than
+   * recomputing from `transformed`, because `worldPosition` is what the shadow
+   * lookup and the environment map read. Leaving it undisplaced is how a leaf
+   * ends up lit through a shadow of where it used to be.
+   */
+  const WIND_FN = /* glsl */ `
+    uniform float uVegWindTime;
+    uniform float uVegWindGain;
+    uniform float uVegWindAmp;
+    uniform float uVegWindReach;
+    uniform vec2  uVegWindDir;
+
+    vec3 vegWindOffset( vec3 wp, vec3 objPos ) {
+      // Cantilever coordinate: 0 where the shoot leaves the twig or the blade
+      // leaves the ground, 1 at the tip. Squared, because a fixed-base beam
+      // deflects roughly as the square of the distance along it.
+      float tip = clamp( length( objPos ) / uVegWindReach, 0.0, 1.0 );
+      tip *= tip;
+
+      float amp = uVegWindAmp * uVegWindGain * tip;
+
+      // Phase from world position. Two nearby cards are a fraction of a cycle
+      // apart, two crowns are unrelated, and none of it costs a byte of
+      // per-instance data.
+      float ph = wp.x * 0.24 + wp.z * 0.31;
+
+      // A gust that travels. Squared to spend most of its time near zero, so
+      // the still air between gusts is the default state and not the mean.
+      float gust = 0.5 + 0.5 * sin( uVegWindTime * 0.13 - wp.x * 0.030 - wp.z * 0.024 );
+      gust *= gust;
+
+      // 11.4 s and 4.8 s. jungle-trail runs a third harmonic at 1.4 s as well;
+      // it is dropped here because it is the one that reads as flutter, and
+      // flutter is weather.
+      float sway = sin( uVegWindTime * 0.55 + ph ) * 0.62
+                 + sin( uVegWindTime * 1.30 + ph * 1.7 ) * 0.28;
+
+      float d = sway * amp * ( 0.30 + 0.70 * gust );
+      vec3 o = vec3( uVegWindDir.x, 0.0, uVegWindDir.y ) * d;
+      // A shoot that bends also gets shorter. Skipping this is what makes cheap
+      // foliage wind look like it is sliding rather than flexing — but it is
+      // also the term that costs the most in shadow, because at 6.2 degrees a
+      // vertical displacement moves its shadow 9.21x further than a horizontal
+      // one does. Kept, at half jungle-trail's weight, and affordable only
+      // because the depth pass is displaced too.
+      o.y -= abs( d ) * 0.15;
+      return o;
+    }
+  `;
+
+  const PROJECT_WIND = /* glsl */ `
+    vec4 vegWindObj = vec4( transformed, 1.0 );
+    #ifdef USE_BATCHING
+      vegWindObj = batchingMatrix * vegWindObj;
+    #endif
+    #ifdef USE_INSTANCING
+      vegWindObj = instanceMatrix * vegWindObj;
+    #endif
+    vec4 vegWindWorld = modelMatrix * vegWindObj;
+    vegWindWorld.xyz += vegWindOffset( vegWindWorld.xyz, transformed );
+    vec4 mvPosition = viewMatrix * vegWindWorld;
+    gl_Position = projectionMatrix * mvPosition;
+  `;
 
   mat.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, uniforms);
+    Object.assign(shader.uniforms, windUniforms, dampUniforms);
 
-    shader.vertexShader = shader.vertexShader
-      .replace(
-        "#include <common>",
-        `#include <common>
+    if (wind) {
+      // A `String.replace` whose needle is absent is a silent no-op, and this
+      // project's dominant defect class is a lever that did nothing. The
+      // projection chunk is mandatory in every material this can be installed
+      // on, so its absence is a three.js upgrade breaking the patch and must
+      // stop the build rather than ship a still crown.
+      if (!shader.vertexShader.includes("#include <project_vertex>")) {
+        throw new Error(
+          "vegTransmission: no <project_vertex> in the vertex shader — the wind " +
+            "displacement has nowhere to land that still reaches gl_Position."
+        );
+      }
+      shader.vertexShader = WIND_FN + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace("#include <project_vertex>", PROJECT_WIND);
+      // Absent from `depth_vert`, which is correct and not a failure: the depth
+      // pass has no environment map and no shadow lookup of its own, so there
+      // is no second consumer of the world position to keep in step.
+      shader.vertexShader = shader.vertexShader.replace(
+        "#include <worldpos_vertex>",
+        "vec4 worldPosition = vegWindWorld;"
+      );
+    }
+
+    if (atlasPx) installMinificationDamp(shader);
+
+    if (!opts) return;
+
+    Object.assign(shader.uniforms, transUniforms);
+
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <common>",
+      `#include <common>
          varying vec3 vFoliageWorldPos;`
+    );
+    // Composed with the wind rather than assigned over it. With wind installed
+    // the world position has already been displaced and the `<worldpos_vertex>`
+    // needle is gone, so the varying is written from `vegWindWorld` — which is
+    // also the more correct value, because the view vector for the transmission
+    // lobe should be measured to where the leaf actually is.
+    shader.vertexShader = wind
+      ? shader.vertexShader.replace(
+        "vec4 worldPosition = vegWindWorld;",
+        `vec4 worldPosition = vegWindWorld;
+         vFoliageWorldPos = vegWindWorld.xyz;`
       )
-      .replace(
+      : shader.vertexShader.replace(
         "#include <worldpos_vertex>",
         `#include <worldpos_vertex>
          // worldPosition only exists when some other chunk asked for it, so this
@@ -98,7 +318,193 @@ export function applyFoliageTransmission<T extends THREE.Material>(
          vFoliageWorldPos = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;`
       );
 
-    shader.fragmentShader = shader.fragmentShader
+    installTransmissionFragment(shader);
+  };
+
+  /* Changing `onBeforeCompile` after a program exists needs this, and
+   * forgetting it is a silent no-op that looks exactly like the term being too
+   * weak. Bumped v2 -> v3 with the wind and the damping: the injected text
+   * changed, and three would otherwise hand back the old program.
+   *
+   * The key must name what varies **in the GLSL**, and nothing else. `wrap`,
+   * `strength`, `falloff`, `broad`, `fill`, the wind amplitude, the reach, the
+   * direction and the atlas size are all passed as uniforms and read as
+   * uniforms; not one of them is substituted into the source. Keying on them
+   * meant every distinct tuple compiled a byte-identical program under a
+   * different key — found by the performance agent, and a real cost: this is
+   * called once per foliage material with different strengths by design, so the
+   * shader cache was being defeated by exactly the parameters it was supposed to
+   * be indifferent to.
+   *
+   * The general test, worth remembering next time a cache key is written: a
+   * value belongs in `customProgramCacheKey` if and only if changing it changes
+   * the *text* handed to `compile`. A uniform never does. Which of the three
+   * terms is *present* does change the text, so each gets a letter.
+   *
+   * A leak between call sites was suspected here on 2026-08-29 and it is NOT
+   * real. Retracted rather than deleted, because the way it was nearly believed
+   * is the useful part:
+   *
+   * Editing only the thatch-sprig call site appeared to change 306622 pixels,
+   * 21% of the frame, including the pine crowns and the sky — which no sprig can
+   * reach, and which reads as damning evidence of shared uniforms. Another agent
+   * committed to `src/systems/LightingSystem.ts` between the two captures. The
+   * diff was measuring their change, not mine. Isolating properly — comparing
+   * two of my own rounds that straddle only my edit — puts the true effect at
+   * 2562 pixels, entirely in the ground rows, with no crown involvement at all.
+   *
+   * So the rule above stands, and the general hazard is a cross-round pixel diff
+   * in a shared tree: it silently attributes every concurrent edit to the last
+   * thing you touched, and it is most convincing when the frame moves in a way
+   * your change could not possibly cause. Diff rounds that straddle one edit, and
+   * check the mtimes of files you do not own before believing a whole-frame move.
+   */
+  const key =
+    "foliage-v3" +
+    (opts ? "-t" : "") +
+    (wind ? "-w" : "") +
+    (atlasPx ? "-d" : "");
+  mat.customProgramCacheKey = () => key;
+  mat.needsUpdate = true;
+  return mat;
+}
+
+/**
+ * Wind only, for the custom depth materials.
+ *
+ * The depth pass does not run the beauty material's `onBeforeCompile`, so
+ * without this the crown is displaced on screen and static in the shadow map,
+ * and every pine is lit through a shadow of its resting position. At 6.2
+ * degrees the arithmetic is not close: 25 mm of horizontal tip travel plus its
+ * vertical component puts the worst-case mismatch at about 90 mm on the ground.
+ */
+export function applyFoliageWind<T extends THREE.Material>(mat: T, wind: FoliageWindOptions): T {
+  return installFoliagePatch(mat, { extras: { wind } });
+}
+
+/**
+ * Installs the terms on a material and returns it. Safe to call on a material
+ * that is shared between meshes; the uniforms are per-material.
+ */
+export function applyFoliageTransmission<T extends THREE.Material>(
+  mat: T,
+  opts: TransmissionOptions,
+  extras: FoliageExtras = {}
+): T {
+  return installFoliagePatch(mat, { transmission: opts, extras });
+}
+
+/**
+ * Beauty terms only, for a material whose tier has dropped the transmission
+ * program. Wind and minification damping are not tier-gated: one is the
+ * difference between a place and a photograph, the other is a correctness fix
+ * that matters *more* at low tier, and neither costs a program of its own.
+ */
+export function applyFoliageBeautyOnly<T extends THREE.Material>(mat: T, extras: FoliageExtras): T {
+  return installFoliagePatch(mat, { extras });
+}
+
+/**
+ * Mip-driven minification damping.
+ *
+ * **The speckled grey mid-distance is not the leaves, it is the sky between
+ * them.** That reframing is the whole of this function and it came from reading
+ * `c:\Code\jungle-trail`, which fought the same thing across a whole forest.
+ *
+ * A foliage card five pixels tall is sampling a mip level where its atlas cell
+ * has collapsed to a handful of texels, so the needle gaps, the chewed margin
+ * and the alpha-zero corners are all averaged into mid-range alpha. Every one
+ * of those values is below `alphaTest`, so the card is eroded from *every edge
+ * at once* — and at 6.2 degrees the thing directly behind a mid-distance crown
+ * is bright dawn sky, which then shows through the gap between each card and
+ * the card it should be touching. Repeated across a few thousand cards that is
+ * the pale speckle, and it is a coverage failure rather than a colour one:
+ * turning the crowns darker or greener cannot close a hole.
+ *
+ * So alpha is *dilated* with the footprint rather than merely sharpened, which
+ * lets many small cards merge into one larger silhouette — which is what real
+ * foliage does at that distance anyway.
+ *
+ * Two properties make this safe to land on a shipped build:
+ *
+ *  - **It is the identity at mip 0.** `vFar` is zero until the footprint
+ *    exceeds about 1.7 texels per pixel, so the foreground provably cannot
+ *    move; a near-field difference would be a bug in this function, not a
+ *    judgement call.
+ *  - **It reverts by deleting one replace.** No geometry, no placement, no new
+ *    material and no new program — the six foliage programs get bigger, they do
+ *    not multiply.
+ *
+ * Deliberately **not** installed on the custom depth materials, and the reason
+ * is worth stating because the opposite looks tidier. This project has a
+ * recorded case where the beauty pass cut at 0.3 and the shadow pass at 0.5 and
+ * 6.9% of drawn pixels cast nothing, concentrated on needle edges — so
+ * "silhouette parity between the two passes" is a rule here. Parity is
+ * preserved where it can be checked: the ramp is the identity in the near
+ * field, which is the only place a crown's own shadow is resolvable. Injecting
+ * it into the depth pass would *break* parity rather than keep it, because
+ * `fwidth` there measures the shadow map's footprint from the light's
+ * viewpoint, not the screen's from the camera's — the two passes would dilate
+ * by different amounts on the same texel and the silhouettes would diverge in
+ * a way that depends on where the sun is.
+ *
+ * The normal-flattening half of jungle-trail's version is omitted: it mixes
+ * toward `nonPerturbedNormal`, and no foliage material here carries a normal
+ * map, so the mix would be an exact no-op. The roughness clamp is kept, because
+ * the geometric normals *are* varied — `foliageCardGeometry` fans them outward
+ * from the shoot axis — and randomly oriented sub-pixel cards each holding a
+ * full-strength specular lobe is aliasing rather than noise, so it does not
+ * average away between frames. It sparkles.
+ */
+function installMinificationDamp(shader: { fragmentShader: string }): void {
+  if (!shader.fragmentShader.includes("#include <map_fragment>")) {
+    throw new Error(
+      "vegTransmission: no <map_fragment> — the alpha dilation must run while " +
+        "there is still an alpha to dilate, i.e. before <alphatest_fragment>."
+    );
+  }
+  shader.fragmentShader = shader.fragmentShader
+    .replace(
+      "#include <common>",
+      `#include <common>
+       uniform float uVegAtlasPx;
+       uniform float uVegDampGain;
+       float vegFar = 0.0;`
+    )
+    // After `<map_fragment>` and therefore before `<alphatest_fragment>`: the
+    // dilation has to happen while there is still an alpha to dilate.
+    .replace(
+      "#include <map_fragment>",
+      `#include <map_fragment>
+       #ifdef USE_MAP
+         vec2 vegFw = fwidth( vMapUv ) * uVegAtlasPx;
+         vegFar = clamp( ( log2( max( max( vegFw.x, vegFw.y ), 1.0 ) ) - 0.8 ) / 2.4, 0.0, 1.0 ) * uVegDampGain;
+         diffuseColor.a = mix( diffuseColor.a,
+                               smoothstep( 0.06, 0.26, diffuseColor.a ), vegFar );
+       #endif`
+    )
+    .replace(
+      "#include <roughnessmap_fragment>",
+      `#include <roughnessmap_fragment>
+       roughnessFactor = mix( roughnessFactor, 0.97, vegFar );`
+    );
+}
+
+function transmissionUniforms(opts: TransmissionOptions) {
+  return {
+    uSunDir: { value: opts.sun.clone().normalize() },
+    uSunCol: { value: opts.sunColour.clone() },
+    uTransTint: { value: opts.tint.clone() },
+    uWrap: { value: opts.wrap ?? 0.55 },
+    uTransStrength: { value: opts.strength ?? 1.5 },
+    uTransFalloff: { value: opts.falloff ?? 3.5 },
+    uTransBroad: { value: opts.broad ?? 0.45 },
+    uCanopyFill: { value: opts.fill ?? 0.5 },
+  };
+}
+
+function installTransmissionFragment(shader: { fragmentShader: string }): void {
+  shader.fragmentShader = shader.fragmentShader
       .replace(
         "#include <common>",
         `#include <common>
@@ -213,41 +619,4 @@ export function applyFoliageTransmission<T extends THREE.Material>(
          }
          #include <opaque_fragment>`
       );
-  };
-  // Changing onBeforeCompile after a program exists needs this, and forgetting
-  // it is a silent no-op that looks exactly like the term being too weak.
-  //
-  // The key must name what varies **in the GLSL**, and nothing else. `wrap`,
-  // `strength`, `falloff`, `broad` and `fill` are all passed as uniforms and
-  // read as uniforms; not one of them is substituted into the source. Keying on
-  // them meant every distinct tuple compiled a byte-identical program under a
-  // different key — found by the performance agent, and a real cost: this is
-  // called once per foliage material with different strengths by design, so the
-  // shader cache was being defeated by exactly the parameters it was supposed to
-  // be indifferent to.
-  //
-  // The general test, worth remembering next time a cache key is written: a
-  // value belongs in `customProgramCacheKey` if and only if changing it changes
-  // the *text* handed to `compile`. A uniform never does.
-  //
-  // A leak between call sites was suspected here on 2026-08-29 and it is NOT
-  // real. Retracted rather than deleted, because the way it was nearly believed
-  // is the useful part:
-  //
-  // Editing only the thatch-sprig call site appeared to change 306622 pixels,
-  // 21% of the frame, including the pine crowns and the sky — which no sprig can
-  // reach, and which reads as damning evidence of shared uniforms. Another agent
-  // committed to `src/systems/LightingSystem.ts` between the two captures. The
-  // diff was measuring their change, not mine. Isolating properly — comparing
-  // two of my own rounds that straddle only my edit — puts the true effect at
-  // 2562 pixels, entirely in the ground rows, with no crown involvement at all.
-  //
-  // So the rule above stands, and the general hazard is a cross-round pixel diff
-  // in a shared tree: it silently attributes every concurrent edit to the last
-  // thing you touched, and it is most convincing when the frame moves in a way
-  // your change could not possibly cause. Diff rounds that straddle one edit, and
-  // check the mtimes of files you do not own before believing a whole-frame move.
-  mat.customProgramCacheKey = () => "foliage-transmission-v2";
-  mat.needsUpdate = true;
-  return mat;
 }

@@ -28,5 +28,14 @@ tools/tmp/
 # permanent copy of a 19.6 MB video to the pack.
 shots/
 
+# Per-round capture directories, written by harnesses that were told not to rely
+# on shots/ surviving a teardown. A glob rather than one named directory,
+# because the naming convention is `capture-<subject>-<date>/` and the next
+# round will make another one — a pattern that has to be extended by hand is a
+# pattern that will be forgotten by whoever is mid-measurement. The numbers from
+# a round live in its HANDOVER, which is committed; the PNGs are regenerable and
+# 1.62 GB of them were just removed by hand.
+capture-*/
+
 # Waveform/spectrum plots emitted by tools/audio.mjs.
 audio-plots/

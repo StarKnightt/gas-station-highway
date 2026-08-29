@@ -10837,3 +10837,179 @@ The confirmation held to the end: the fixed object measured 160×393 at 0.70 m
 against a CPU prediction of 152×379, and the pixel under investigation fell
 inside the measured box once the 0.04 rad tape-skew the CPU model omitted was
 accounted for.
+
+## The speckled grey mid-distance is not the leaves, it is the sky between them
+
+An appearance complaint restated as a coverage failure, which is the move that
+also solved the gravel, the notices and the treeline.
+
+Alpha-tested foliage minifies badly in a way that has nothing to do with colour.
+A card five pixels tall samples a mip level where its whole atlas cell has
+collapsed to a handful of texels, so the needle gaps, the chewed margin and the
+alpha-zero corners are all averaged into mid-range alpha. Every one of those
+values is *below* the alpha test, so the card is eroded from **every edge at
+once** — and what shows through the resulting gap between each card and the card
+it should be touching is whatever is behind the crown. At a 6.2 degree sun that
+is bright sky. Repeated across a few thousand cards, the pale speckle in the
+middle of the frame is not foliage that has gone grey; it is background leaking
+through holes that alpha averaging opened.
+
+The diagnostic value is that it changes what a fix is allowed to be. Darkening
+the crowns, greening them or reaching for their albedo cannot close a hole, and
+four rounds spent on a colour that was never wrong is the standard outcome of
+reading this as an appearance problem. The fix is to *dilate* alpha with the
+mip footprint so small cards merge into one larger silhouette — which is what
+real foliage does at that distance anyway — and to hold the ramp at the identity
+in the near field so the foreground provably cannot move.
+
+Measured here at 5.00% of the frame moving by more than three codes with the
+wind held at zero, and a row profile across the knee-height pose that runs 0% in
+the top two bands, 18% at mid distance and 0.94% in the bottom band. The shape
+of that profile is the claim: the effect appears where things minify and nowhere
+else.
+
+The general form: **when a surface reads as noisy, ask what is behind it before
+asking what colour it is.** A speckle whose brightness matches the background is
+a coverage failure wearing an appearance failure's clothes.
+
+## An attribute means what the geometry it is on cannot contradict
+
+From `c:\Code\jungle-trail`, and it is a principle rather than a trick.
+
+That project packs one `vec2` per vertex called `aSurf`. On wood, `y` is signed
+moss — positive is living moss on the bark, negative is heartwood where the bark
+has rotted off. On leaves the same slot is a per-leaf random that selects one of
+three undersides. The justification is exact: **a leaf never has moss on it and
+a trunk never has an abaxial surface, so the two meanings cannot collide.**
+
+The alternative it rejects is the one that looks more disciplined — a fifth
+per-vertex float, holding one number per leaf, on every leaf in a forest. That
+is described as the most expensive possible way to say it, and the arithmetic is
+not close.
+
+The rule that generalises: an attribute slot is safe to overload when the
+*geometry* makes the two uses disjoint, not when the code currently happens to
+keep them apart. The first is a property nobody can break by editing a shader;
+the second is a comment. Ask what object the vertex belongs to, and if no object
+of that kind can ever want both meanings, the slot is one slot.
+
+## Prove a pass is useless by measurement before deleting it
+
+Also from `c:\Code\jungle-trail`, and it is the only defensible way to remove a
+rendering pass.
+
+Three storeys of canopy patches were being rendered into the shadow map. The
+argument for taking them out could have been made from cost — the roof was the
+heaviest thing in the depth pass — and that argument would have been an
+optimisation dressed as a correction. What was done instead was a measurement:
+with the hemisphere fill, the environment and the leaf transmission all set to
+zero and the sun at nearly double strength, the forest floor rendered
+**completely black, with no lit pixel anywhere in frame.**
+
+That single number converts the change from a trade to a deletion. The pass was
+spending most of its resolution and most of its fill rate to produce a constant,
+and the constant it produced was the reason the frame had no direct light in it
+anywhere. Nothing is lost by removing a pass whose output has been shown to be
+constant, and the replacement — an analytic transmittance with a penumbra that
+widens with distance to the occluder — could then be judged on whether it looked
+right rather than on whether it was cheaper.
+
+The inverse is the failure mode: a pass removed because it was expensive, with
+its visual contribution assumed rather than measured, and the loss discovered
+three rounds later in a critique. **Cost justifies looking; only a measurement
+of the output justifies deleting.**
+
+## A "bit-identical" prediction needs the determinism floor measured first, and the floor is a peak
+
+Registered before a capture: two null frames must differ by exactly zero pixels.
+They differed by 43 and 74, at a peak of **1 code**.
+
+The instinct at that point is to soften the threshold, and the instinct is
+wrong — a threshold chosen after seeing the number is not a prediction. What is
+right is to find out what the achievable floor is, by adding an arm that is
+byte-for-byte identical to an existing one and diffing the two.
+
+**Zero is not the null hypothesis on a GPU.** A real-time renderer reproduces
+itself to about one code, so any prediction phrased as "identical" is really a
+prediction about a floor nobody has measured. The floor arm is cheap insurance
+that has to be registered *with* the predictions, because adding it afterwards
+is indistinguishable from moving the goalposts.
+
+**And the floor has to be a peak, not a count.** The first correction here was
+to gate on the identical pair's pixel count, which failed on the next run for a
+reason worth keeping: across three runs of the same bundle, two byte-identical
+loads gave **84, 19 and 13** differing pixels — always at peak exactly 1. The
+count in that regime is not reproducible and a count-based bar flaps; the peak
+is reproducible and is also the *stricter* statistic for what a null test is
+actually looking for. The failure being guarded against — a silhouette
+divergence between the beauty and shadow passes — moves needle-edge pixels by
+tens of codes against a bright sky, so a peak bar catches a single mismatched
+pixel where an 84-pixel count bar would absorb dozens of them.
+
+Changing a criterion after seeing data is the thing this note opens by warning
+about, so the distinction has to be stated: the count was not loosened to make a
+number pass, it was **replaced by a statistic shown to be reproducible**, and
+the replacement is tighter on the defect it exists to find. Keep printing the
+count anyway — a null pair that suddenly moved ten thousand pixels at peak 1
+would be worth knowing about even though every one of them is invisible.
+
+The separation this bought, for scale: null pairs sit at tens of pixels and peak
+1, while the arms they are compared against sit at 128,000 pixels and peak 172.
+Three orders of magnitude in count and two in amplitude.
+
+## `onBeforeCompile` is a property, so a second feature assigns over the first
+
+Three shader features now inject into the foliage materials — transmission,
+vertex wind and minification damping — and the natural way to add the second and
+third is a second and third `mat.onBeforeCompile = ...`. That silently deletes
+the earlier one. The material still compiles, still renders, and quietly loses
+the single largest visual feature in the vegetation, which is the failure this
+project keeps meeting under different names.
+
+The fix is not care, it is structure: **one function in one file assigns
+`onBeforeCompile`, and every term is a branch inside it.** Composition then
+cannot be forgotten, because there is nowhere else to put it. Two corollaries
+fell out of doing it:
+
+- Terms that both patch the *same* chunk have to be composed by hand rather than
+  chained. The wind replaces `<worldpos_vertex>` outright, so the transmission's
+  append to that chunk has no needle left to find, and the composed version
+  writes its varying from the wind's already-displaced world position — which is
+  also the more correct value.
+- The cache key has to name **which terms are present**, because that is what
+  changes the text. It must still not name their parameters. Amplitude, reach,
+  direction, atlas size, wrap, strength and falloff are all uniforms, and a
+  uniform never changes the source handed to `compile`.
+
+The same hazard has now bitten three files here. It is worth grepping for two
+assignments to the same `onBeforeCompile` before believing any shader term is
+merely too weak.
+
+## A harness that spawns through a shell has not killed what it started
+
+The teardown contract in this repo says the preview server and the browser are
+registered with one shutdown routine wired to every exit path. A new harness
+obeyed it exactly and still left a listener on its port, twice.
+
+`spawn(cmd, args, { shell: true })` returns the **shell's** handle, not the
+child's. `server.kill()` signals the shell; `vite preview` under it survives,
+keeps the port, and the next run fails with `EADDRINUSE` after burning its full
+sixty-second readiness budget. On Windows the fix is `taskkill /PID <pid> /T /F`
+alongside the `kill()`, and a short await before `process.exit` so the tree has
+unwound before the process image goes.
+
+Two smaller things learned in the same half hour. A port can be free of
+listeners and still refuse `--strictPort`, because half a dozen sockets are
+sitting in `TIME_WAIT` on it; moving to a fresh port is correct and dropping
+`--strictPort` is not, since a harness that silently relocates is a harness
+whose captures came from somewhere nobody checked. And a readiness wait should
+fail *immediately* on `EADDRINUSE` in the child's stderr rather than timing out,
+because sixty seconds of silence reads as "slow" and sends you looking in the
+wrong place.
+
+Recorded alongside the two existing backtick-in-a-template-literal entries for
+the same underlying reason: this one is the shell's turn. A heredoc carrying
+prose about `taskkill /PID <pid> /T /F` truncated mid-sentence and appended a
+half-written section, which is the **fourth** occurrence of prose about code
+carrying characters the surrounding language reserves. Write documentation with
+a file-writing tool, not by piping text through a shell.

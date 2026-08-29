@@ -13,7 +13,14 @@ import {
   type LitterStats,
 } from "../gen/vegLitter";
 import { HORIZON_BANDS, SKY_HAZE } from "../gen/vegHorizonBands";
-import { applyFoliageTransmission, type TransmissionOptions } from "../gen/vegTransmission";
+import {
+  applyFoliageBeautyOnly,
+  applyFoliageTransmission,
+  applyFoliageWind,
+  type FoliageExtras,
+  type FoliageWindOptions,
+  type TransmissionOptions,
+} from "../gen/vegTransmission";
 import { buildPine, foliageCardGeometry, type FoliageCard } from "../gen/vegPine";
 import { buildFence, buildPoleLine } from "../gen/vegProps";
 import { buildClump, clumpForm, CLUMP_CARD, CLUMP_KINDS, type ClumpKind } from "../gen/vegScrub";
@@ -30,7 +37,7 @@ import {
 /** The broad type a *place* implies, before vigour decides the form. */
 type BaseKind = "grass" | "weed" | "tuft";
 import { makePineBark, makePineShoot, makeScrubCard, makeTimber } from "../gen/vegTextures";
-import { DRIVEWAYS, PAD, ROAD } from "../site";
+import { DRIVEWAYS, PAD, ROAD, WIND } from "../site";
 
 /**
  * System 6: vegetation, the distant landscape and the edges of the world.
@@ -70,6 +77,24 @@ import { DRIVEWAYS, PAD, ROAD } from "../site";
  * `?vshadow=0` stops foliage casting. `window.__VEGETATION` carries the built
  * counts so a harness can assert the system produced geometry instead of
  * inferring it from a screenshot.
+ *
+ * Three levers for the shader terms, and the first two are **scales rather than
+ * toggles** on purpose: at shipping amplitude a working wind and a dead wind are
+ * indistinguishable in a still frame, so an arm that can only turn a term off
+ * cannot separate "subtle" from "inert". They are uniforms, so every arm runs
+ * the identical program and a diff between two arms is a diff of pixels rather
+ * than of two different shaders.
+ *
+ *   ?vegwind=   leaf wind. 0 is exactly still, 1 ships, 8 is the arm that
+ *               proves the displacement is wired and that the shadows follow.
+ *   ?vegdamp=   minification damping. 0 is an exact identity.
+ *   ?vegdepth=0 no custom depth materials. Both the documented fallback and
+ *               the arm that measures the depth patch: at ?vegwind=0 it must
+ *               be pixel-identical to shipping, because a depth material that
+ *               displaces nothing must cut the same silhouette.
+ *
+ * All four are echoed into `__VEGETATION`, so a capture asserts the lever
+ * arrived rather than assuming the query string was spelled correctly.
  */
 
 type Ground = (x: number, z: number) => number;
@@ -113,6 +138,54 @@ type SoilService = SoilQuery & { colourSpace: string };
 
 /** Sun elevation used only to report expected shadow lengths in the debug blob. */
 const REPORT_SUN_EL = 6.2;
+
+/**
+ * The `WIND.strength` the amplitudes below were chosen against.
+ *
+ * Named rather than inlined so that the coupling is visible from both ends: if
+ * the site declares a rougher dawn the leaves scale with it, and if someone
+ * wants the leaves to move more they have to say so about the *weather* rather
+ * than about the shader.
+ */
+const WIND_AUTHORED_AT = 0.35;
+
+/**
+ * Peak tip excursion per foliage layer, metres, at `WIND_AUTHORED_AT`.
+ *
+ * It is dawn after a night of rain and the air is nearly still, so these are
+ * deliberately at the edge of perceptible. 25 mm at a pine tip is about one
+ * pixel of travel at 20 m: a slow breathing of the crown, not a sway. A visible
+ * sway would be worse than the stillness it replaces, because it would
+ * contradict the standing water, the long shadows and a sound design that is
+ * silence plus a distant highway.
+ *
+ * They are not one number scaled by height. A global height ramp is a lever
+ * nobody can check; three explicit numbers can each be argued about separately,
+ * and the mid-storey one is the one that matters most because it is at eye
+ * level in the near field where a wrong amplitude would be obvious.
+ *
+ * The thatch sprigs get nothing. They are cured grass lying flat as a ground
+ * sheet, they do not cast, and a ground sheet that ripples reads as water.
+ */
+const WIND_TIP_M = {
+  /** 13 m pines. The layer this effect is for. */
+  pine: 0.025,
+  /** Sage, thistle and saplings at 0.6-2.6 m. */
+  mid: 0.006,
+  /** 40 cm scrub tufts. Nearly nothing, and nearly nothing is the right answer. */
+  scrub: 0.001,
+};
+
+/**
+ * Object-space distance from an instance origin at which a vertex is a tip.
+ *
+ * Measured from the builders rather than guessed: `foliageCardGeometry` puts
+ * its root corners 0.22 from the origin and its tip corners at about 1.12, and
+ * `buildClump` runs its blades out to roughly 1.0. These are the denominators
+ * of the cantilever ramp, so getting them wrong makes a plant limp or stiff
+ * rather than making it move the wrong way.
+ */
+const WIND_REACH = { card: 1.12, clump: 1.0 };
 
 /* ------------------------------------------------------------------ */
 /* site plan for this system                                           */
@@ -267,6 +340,28 @@ export class VegetationSystem implements GameSystem {
   private transmitEnabled = true;
 
   /**
+   * The wind clock, shared **by reference** with every foliage material.
+   *
+   * One write per frame drives all of them. Held on the system rather than
+   * created per material so that the crowns cannot drift out of phase with each
+   * other, which would be visible as two neighbouring pines breathing against
+   * one another.
+   */
+  private windTime = { value: 0 };
+  /** `?vegwind=` — a scale, not a toggle. See `FoliageWindOptions.gain`. */
+  private windGain = { value: 1 };
+  /** `?vegdamp=` — the minification damping's control arm, same shape as the wind's. */
+  private dampGain = { value: 1 };
+  /** `?vegdepth=0` — the fallback arm: wind on screen, no custom depth material. */
+  private depthPatchEnabled = true;
+  /** Beauty/depth pairs, checked after init. See `assertShadowSilhouetteParity`. */
+  private shadowPairs: {
+    label: string;
+    beauty: THREE.MeshStandardMaterial;
+    depth: THREE.MeshDepthMaterial;
+  }[] = [];
+
+  /**
    * The single place the transmission hook is installed, so the tier gate cannot
    * be honoured at three call sites and missed at the fourth.
    *
@@ -275,9 +370,133 @@ export class VegetationSystem implements GameSystem {
    * broken. Routing every caller through one method makes that failure a
    * compile error instead of a measurement to squint at, and `grep
    * applyFoliageTransmission` should find only the import and this line.
+   *
+   * Extended with wind and minification damping, which are **not** tier-gated
+   * and must survive `transmission: false`. Routing them through the same
+   * method keeps the one-call-site property: the tier decides whether the
+   * transmission term is in the composed shader, not whether the shader exists.
    */
-  private maybeTransmit<T extends THREE.Material>(mat: T, opts: TransmissionOptions): T {
-    return this.transmitEnabled ? applyFoliageTransmission(mat, opts) : mat;
+  private maybeTransmit<T extends THREE.Material>(
+    mat: T,
+    opts: TransmissionOptions,
+    extras: FoliageExtras = {}
+  ): T {
+    return this.transmitEnabled
+      ? applyFoliageTransmission(mat, opts, extras)
+      : applyFoliageBeautyOnly(mat, extras);
+  }
+
+  /**
+   * Wind parameters for one foliage layer.
+   *
+   * `amplitude` is the peak excursion of a tip vertex in metres and the three
+   * layers differ by more than an order of magnitude, which is the point: a
+   * pine tip 13 m up in a light air moves centimetres and a 40 cm tuft of
+   * cured grass moves almost nothing. There is no global height ramp doing
+   * this — the amplitudes are per layer and explicit, because a ramp would be
+   * a number nobody can check against anything.
+   *
+   * `reach` is in object space, so it is a property of the geometry and not of
+   * the instance: `foliageCardGeometry` runs its shoot from x=0 at the root to
+   * x=1 at the tip with corners half a unit out, giving a bounding radius of
+   * about 1.12, and `buildClump` blades run out to roughly 1.0 from the
+   * clump origin. A vertex at the origin gets nothing, which is what puts the
+   * motion at the tips and none at the base.
+   */
+  private windFor(amplitude: number, reach: number): FoliageWindOptions {
+    return {
+      // Scaled by the site's declared wind rather than authored free-standing,
+      // so the leaves, the litter drift and the wall grime all answer to one
+      // number. `WIND_AUTHORED_AT` records the strength these were chosen
+      // against; if the site ever declares a rougher dawn they scale with it.
+      amplitude: amplitude * (WIND.strength / WIND_AUTHORED_AT),
+      reach,
+      time: this.windTime,
+      gain: this.windGain,
+      // Consumed from `site.WIND` rather than duplicated. A shared constant is
+      // a number two systems can disagree about; this is the same bearing the
+      // ground accumulation drifts litter along and the same one Building
+      // streaks its walls with, so the leaves lean the way the rubbish piles.
+      direction: new THREE.Vector2(Math.cos(WIND.bearing), Math.sin(WIND.bearing)),
+    };
+  }
+
+  /**
+   * The depth material for one casting foliage layer, plus the assertion that
+   * it still casts what its beauty material draws.
+   *
+   * The depth pass does not run the beauty material's `onBeforeCompile`, so a
+   * wind term installed only on the beauty material displaces the crown on
+   * screen and leaves its shadow at the resting position. At 6.2 degrees that
+   * is not a rounding error: 25 mm of horizontal tip travel moves its shadow
+   * 25 mm, and the vertical component moves it a further 9.21x, for a
+   * worst-case mismatch around 90 mm on the ground.
+   *
+   * **The assertion is the point of this function, not the material.** There
+   * is a recorded case here where `alphaToCoverage` made three silently force
+   * the shadow threshold to 0.5 while the beauty pass cut at 0.3, and 6.9% of
+   * everything drawn cast nothing — concentrated on needle edges, which is
+   * exactly the detail a crown shadow is made of. Deriving the depth material
+   * from the beauty material's own fields makes the immediate check nearly
+   * tautological, so the real check is `assertShadowSilhouetteParity` below,
+   * which runs over the built scene after everything is placed and can catch a
+   * later edit that this constructor cannot see.
+   */
+  private foliageDepth(
+    label: string,
+    beauty: THREE.MeshStandardMaterial,
+    wind: FoliageWindOptions
+  ): THREE.MeshDepthMaterial | undefined {
+    if (!this.depthPatchEnabled) return undefined;
+    const depth = new THREE.MeshDepthMaterial({
+      depthPacking: THREE.RGBADepthPacking,
+      map: beauty.map,
+      alphaTest: beauty.alphaTest,
+      side: beauty.shadowSide ?? beauty.side,
+    });
+    applyFoliageWind(depth, wind);
+    this.materials.push(depth);
+    this.shadowPairs.push({ label, beauty, depth });
+    return depth;
+  }
+
+  /**
+   * What casts must be exactly what draws, asserted over the built scene.
+   *
+   * Runs at the end of `init`, after every mesh is placed, so it sees the
+   * materials as they actually ship rather than as they were constructed.
+   * Throws rather than reporting, because a silhouette that differs between
+   * the two passes is not a degradation anyone will notice as a defect — it
+   * reads as the crown being slightly wrong, which is a thing this project has
+   * already spent rounds chasing from the wrong end.
+   */
+  private assertShadowSilhouetteParity(): void {
+    const faults: string[] = [];
+    for (const { label, beauty, depth } of this.shadowPairs) {
+      if (depth.map !== beauty.map) faults.push(`${label}: depth.map is not the beauty map`);
+      if (depth.alphaTest !== beauty.alphaTest) {
+        faults.push(`${label}: alphaTest ${depth.alphaTest} (depth) vs ${beauty.alphaTest} (beauty)`);
+      }
+      // The trigger for the recorded failure, checked directly. three does
+      //   result.alphaTest = ( material.alphaToCoverage === true ) ? 0.5 : material.alphaTest
+      // inside the renderer, so no amount of care on our own objects survives
+      // this flag being switched back on.
+      if (beauty.alphaToCoverage) {
+        faults.push(`${label}: beauty.alphaToCoverage is on, so three will force the shadow cut to 0.5`);
+      }
+      if (depth.side !== (beauty.shadowSide ?? beauty.side)) {
+        faults.push(`${label}: depth.side does not match the beauty shadowSide`);
+      }
+    }
+    // A pass that checks nothing is indistinguishable from a pass that passes,
+    // so the empty case is a fault unless it was asked for.
+    if (!this.shadowPairs.length && this.report.castFoliage && this.depthPatchEnabled) {
+      faults.push("no beauty/depth pairs registered, but foliage is casting — the wind will not reach the shadow map");
+    }
+    if (faults.length) {
+      throw new Error("VegetationSystem: shadow silhouette parity failed —\n  " + faults.join("\n  "));
+    }
+    this.report.shadowPairs = this.shadowPairs.map((p) => p.label);
   }
   private wireMats: THREE.ShaderMaterial[] = [];
 
@@ -428,6 +647,75 @@ export class VegetationSystem implements GameSystem {
     const transScale = num("vtrans", 1);
     this.report.transScale = transScale;
 
+    /**
+     * `?vegwind=` — the leaf wind, as a **scale rather than a toggle**.
+     *
+     * 0 forces it off and is bit-identical to no wind at all: every product in
+     * `vegWindOffset` contains the gain, so a zero propagates exactly and there
+     * is no float residue to confuse a null-arm diff. 1 is shipping. 8 is the
+     * arm that makes the term verifiable, and it exists because at shipping
+     * amplitude **a working wind and a dead wind are indistinguishable in a
+     * still frame** — several of this project's shader levers have shipped
+     * invisible, and a control that cannot separate "subtle" from "inert" is
+     * not a control.
+     *
+     * A uniform rather than a compile-time branch, deliberately: the GLSL text
+     * is identical across every arm, so the control and the shipping build
+     * share one program and the comparison is of pixels rather than of two
+     * different shaders. That is the opposite of the `vtrans` gate one screen
+     * up, and the difference is that this one is a *measurement* lever while
+     * that one is a *cost* lever — a tier decision has to not install the hook,
+     * a control has to keep everything else equal.
+     */
+    const windGain = num("vegwind", 1);
+    if (!Number.isFinite(windGain) || windGain < 0) {
+      throw new Error(`VegetationSystem: ?vegwind must be a non-negative number, got "${q.get("vegwind")}"`);
+    }
+    this.windGain.value = windGain;
+    // Echoed so a capture can assert the lever arrived. A typo in a query
+    // parameter that silently defaults is how `vforce=nohorizon` was read as
+    // "the distant landscape is not mine" for a whole round.
+    this.report.windGain = windGain;
+    this.report.windBearing = WIND.bearing;
+    this.report.windStrength = WIND.strength;
+    this.report.windTipMetres = {
+      pine: WIND_TIP_M.pine * (WIND.strength / WIND_AUTHORED_AT),
+      mid: WIND_TIP_M.mid * (WIND.strength / WIND_AUTHORED_AT),
+      scrub: WIND_TIP_M.scrub * (WIND.strength / WIND_AUTHORED_AT),
+    };
+
+    /**
+     * `?vegdamp=` — the control arm for the minification damping.
+     *
+     * The damping is the identity at mip 0 by construction, so a near-field
+     * difference between `?vegdamp=0` and shipping would be a bug in the ramp
+     * rather than a judgement about the effect. That is what makes this lever
+     * worth its two lines: it turns "does the dilation help the mid distance"
+     * into a subtraction rather than an opinion, and it does it without a
+     * rebuild.
+     */
+    const dampGain = num("vegdamp", 1);
+    if (!Number.isFinite(dampGain) || dampGain < 0) {
+      throw new Error(`VegetationSystem: ?vegdamp must be a non-negative number, got "${q.get("vegdamp")}"`);
+    }
+    this.dampGain.value = dampGain;
+    this.report.dampGain = dampGain;
+
+    /**
+     * `?vegdepth=0` — wind on screen with no custom depth material.
+     *
+     * Two jobs. It is the **fallback** if the depth patch ever has to come out:
+     * with the vertical shortening term dropped, worst-case beauty-versus-
+     * shadow mismatch falls from about 90 mm to 25 mm, and shipping wind
+     * without a depth patch becomes arguable. And it is the **measurement**:
+     * at `?vegwind=0` this arm must be pixel-identical to shipping, because a
+     * depth material that displaces nothing must also cut exactly the same
+     * silhouette. Any difference there is the recorded alphaTest-divergence
+     * failure returning, and it would be invisible to any other check.
+     */
+    this.depthPatchEnabled = num("vegdepth", 1) > 0.5;
+    this.report.depthPatch = this.depthPatchEnabled;
+
     /*
      * Compile-time tier gate. Distinct from `?vforce=`, deliberately.
      *
@@ -455,7 +743,8 @@ export class VegetationSystem implements GameSystem {
       mat: T,
       tint: THREE.Color,
       strength: number,
-      fill = 0.55
+      fill = 0.55,
+      extras: FoliageExtras = {}
     ) =>
       this.maybeTransmit(mat, {
         sun: sunDirection,
@@ -466,13 +755,20 @@ export class VegetationSystem implements GameSystem {
         falloff: 3.5,
         broad: 0.5,
         fill: fill * transScale,
-      });
+      }, extras);
     // Light that has come through a needle is warmer and more saturated than
     // light that bounced off one. Scrub and grass transmit more than conifer
     // needles do, which is why the strengths differ below.
     const NEEDLE_TRANSMIT = new THREE.Color(1.15, 0.86, 0.42);
     const LEAF_TRANSMIT = new THREE.Color(1.20, 1.02, 0.46);
     const castFoliage = num("vshadow", 1) > 0.5;
+
+    // One options object per layer, shared across that layer's materials. The
+    // `time` and `gain` handles inside are the system's own, so every foliage
+    // program reads one clock and one lever.
+    const pineWind = this.windFor(WIND_TIP_M.pine, WIND_REACH.card);
+    const midWind = this.windFor(WIND_TIP_M.mid, WIND_REACH.card);
+    const scrubWind = this.windFor(WIND_TIP_M.scrub, WIND_REACH.clump);
 
     /* ---------------- exclusion regions ---------------- */
     const footprint = game.tryGet<Rect>("building.footprint");
@@ -824,7 +1120,11 @@ export class VegetationSystem implements GameSystem {
               metalness: 0,
               envMapIntensity: 1.0,
               dithering: true,
-            }), NEEDLE_TRANSMIT, 5.7, 2.2);
+            }), NEEDLE_TRANSMIT, 5.7, 2.2, {
+            wind: pineWind,
+            dampAtlasPx: tex.image?.width ?? 512,
+            dampGain: this.dampGain,
+          });
         const im = new THREE.InstancedMesh(cardGeo, mat, set.length);
         set.forEach((c, i) => {
           im.setMatrixAt(i, c.matrix);
@@ -834,6 +1134,12 @@ export class VegetationSystem implements GameSystem {
         if (im.instanceColor) im.instanceColor.needsUpdate = true;
         im.name = label;
         im.castShadow = castFoliage;
+        // Displaced geometry has to cast a displaced shadow. Installed
+        // regardless of `castFoliage` so that `?vshadow=0` and `?vshadow=1`
+        // differ only in whether the mesh casts, not in what it would cast.
+        if (!magenta) {
+          im.customDepthMaterial = this.foliageDepth(label, mat as THREE.MeshStandardMaterial, pineWind);
+        }
         im.receiveShadow = true;
         im.computeBoundingSphere();
         this.group.add(im);
@@ -1000,7 +1306,11 @@ export class VegetationSystem implements GameSystem {
               metalness: 0,
               envMapIntensity: 1.0,
               dithering: true,
-            }), LEAF_TRANSMIT, 4.9, 1.8);
+            }), LEAF_TRANSMIT, 4.9, 1.8, {
+            wind: midWind,
+            dampAtlasPx: shootLive.image?.width ?? 512,
+            dampGain: this.dampGain,
+          });
         const im = new THREE.InstancedMesh(cardGeo, mat, midCards.length);
         midCards.forEach((c, i) => {
           im.setMatrixAt(i, c.matrix);
@@ -1010,6 +1320,13 @@ export class VegetationSystem implements GameSystem {
         if (im.instanceColor) im.instanceColor.needsUpdate = true;
         im.name = "veg-mid-foliage";
         im.castShadow = castFoliage;
+        if (!magenta) {
+          im.customDepthMaterial = this.foliageDepth(
+            "veg-mid-foliage",
+            mat as THREE.MeshStandardMaterial,
+            midWind
+          );
+        }
         im.receiveShadow = true;
         im.computeBoundingSphere();
         this.group.add(im);
@@ -1214,7 +1531,11 @@ export class VegetationSystem implements GameSystem {
               metalness: 0,
               envMapIntensity: 1.0,
               dithering: true,
-            }), LEAF_TRANSMIT, 5.2, 1.6);
+            }), LEAF_TRANSMIT, 5.2, 1.6, {
+            wind: scrubWind,
+            dampAtlasPx: cards[CLUMP_CARD[kind]].image?.width ?? 512,
+            dampGain: this.dampGain,
+          });
         if (magenta) mat.vertexColors = false;
         const im = new THREE.InstancedMesh(geo, mat, list.length);
         const m = new THREE.Matrix4();
@@ -1247,6 +1568,9 @@ export class VegetationSystem implements GameSystem {
         im.userData.tierScatterApplied = true;
         im.name = `veg-scrub-${kind}-${far ? "far" : "near"}-${v}`;
         im.castShadow = castFoliage;
+        if (!magenta) {
+          im.customDepthMaterial = this.foliageDepth(im.name, mat as THREE.MeshStandardMaterial, scrubWind);
+        }
         im.receiveShadow = true;
         im.computeBoundingSphere();
         this.group.add(im);
@@ -1346,6 +1670,8 @@ export class VegetationSystem implements GameSystem {
     this.report.shadowAlphaTest = alphaTest;
     this.report.alphaToCoverage = false;
     this.report.castFoliage = castFoliage;
+    // After every mesh is placed, so it reads the materials as they ship.
+    this.assertShadowSilhouetteParity();
     this.report.shadowLengthPerMetre = Number((1 / Math.tan((REPORT_SUN_EL * Math.PI) / 180)).toFixed(2));
     this.report.force = [...force];
 
@@ -2329,7 +2655,22 @@ export class VegetationSystem implements GameSystem {
     if (!magenta) this.wireMats.push(mat as THREE.ShaderMaterial);
   }
 
-  update(_dt: number, _elapsed: number, ctx: SystemContext): void {
+  update(_dt: number, elapsed: number, ctx: SystemContext): void {
+    /* The wind clock, and it goes **above** the early return below.
+     *
+     * That early return is for the wire materials, and putting the clock after
+     * it would stop the leaves whenever the wire layer is absent — including
+     * under `?vforce=nowire`, which is somebody else's control arm. The failure
+     * would be invisible in the shipping build and would appear only in a
+     * capture taken to isolate a different system, where it would look like
+     * evidence about the wires. This project has already lost a round to a flag
+     * assigned after the thing it gated was built.
+     *
+     * `elapsed` rather than an accumulator of `dt`, so a dropped frame moves the
+     * crowns to where they should be rather than pausing them.
+     */
+    this.windTime.value = elapsed;
+
     // The width floor is in pixels, so the shader needs the viewport height.
     // Read every frame rather than on a resize event: this system does not own
     // the canvas and there is no cost to a uniform write.
