@@ -14,6 +14,10 @@ and nothing in it was loaded from a file.*
 
 **Walk it: https://starknightt.github.io/gas-station-highway/**
 
+**Read the brief it was built from: [PROMPT.md](PROMPT.md)** — one page, unedited,
+with the places the finished build departs from it listed underneath. **How it was
+actually built, and what that cost: [BUILD.md](BUILD.md).**
+
 Read the first-load note below before you open that link — the very first load
 in a given browser takes about **216 seconds**, and almost all of it is your
 graphics driver compiling shaders. Every load after it takes about twenty.
