@@ -11,30 +11,49 @@ it is being compared against.
 
 ---
 
-## TEARDOWN — do this when the work is finished, not before
+## TEARDOWN — DONE 2026-08-29, after Building's final load reported PASS
 
-The user has asked for the disposable output to be deleted **once the work is
-done**. It is still load-bearing until then: `shots/` is the evidence every
-critic pass reads, and the per-round archives are what makes a before/after
-comparison traceable in a tree six agents commit to.
+**This has happened. 1548 MB was deleted.** The section is kept as the record of
+what went and what survived, because most of the capture paths cited throughout
+this file, `NOTES.md`, `PERF.md` and the handovers now point at deleted
+directories. Those citations were not rewritten: they are statements about what
+was measured at the time, and they stay true after the pixels are gone. **Read
+any `shots/`, `tmp/` or `.shot-build/` path in this repo against the keep-list
+below — if it is not on it, the file no longer exists.**
 
-At teardown, delete:
+Deleted in full: `.shot4-build/`, `.shot7-build/`, `.shot-reach-build/`,
+`audio-plots/`. Deleted except for the keep-list: `shots/`, `tmp/`,
+`.shot-build/`.
 
-- `shots/` — 1.3 GB. Capture rounds, the `_*` scratch directories, the PNG
-  sequences under `shots/film/frames/`, and the run logs. **Keep
-  `shots/film/dawn-station.mp4` — the user has asked for it explicitly.** It is
-  the only rendered artefact and is not in git, deliberately, because it is
-  regenerated output, so deleting it destroys the only copy.
-- `.shot-build/` — 27 MB, per-system private bundles. Pure build output.
-- `tmp/` — 30 MB scratch. Contains `tmp/film-standdown/`, which is the recovery
-  snapshot of `tools/filmwalk.mjs`; that one is safe to drop once the film
-  harness has been confirmed good.
-- `audio-plots/` — 344 KB of offline audio plots.
+Kept, and verified present by checksum after the delete:
 
-Then `git gc --prune=now` to reclaim the ~379 MB of unreachable loose objects
-left by an early `git add -A` that touched `shots/`. None of it was pushed.
+- `shots/film/dawn-station.mp4` — 19.6 MB, the only rendered artefact and not in
+  git, deliberately, because it is regenerated output. Deleting it destroys the
+  only copy.
+- The frames cited as evidence for landed work: `shots/boot/{cold,warm}/frames.json`
+  (loading), `shots/car/side.png` and `shots/car/env/mirror_r0.png` (car),
+  `shots/system2/{interior-expo,interior-v2,interior-dbgfix,cooler-expo,cooler-v2}.png`
+  (the interior regrade), `shots/system6/approach_lineonly.png` and
+  `shots/system6/rounds/2026-08-28T174415Z-f3ccdfca121f/wide.png`,
+  `shots/walkprobe/glass-82.png`, and `.shot-build/judge_period.png` (terrain).
+- `shots/walkprobe-film-0637/` — all 10 files, not just the two cited. It was
+  archived deliberately because `tools/walkprobe.mjs` overwrites a fixed
+  directory, and nothing records why the other eight were saved. 14 MB against
+  an unrecoverable loss is not a trade worth taking.
+- `shots/envbind/` — 33 MB, 38 frames. `tools/envbind.mjs` covers car, pumps,
+  terrain and vegetation as well as building, and `PERF.md` cites it.
+- `tmp/film-standdown/` — the recovery snapshot of `tools/filmwalk.mjs`. The
+  earlier note here said it was safe to drop *once the film harness has been
+  confirmed good*; there is no record of that confirmation, and an unmet
+  precondition is not a met one.
 
-All four paths are already in `.gitignore`, so none of this affects the repo at
+**`git gc --prune=now` was deliberately NOT run**, so the ~379 MB of unreachable
+loose objects left by an early `git add -A` that touched `shots/` is still
+there. It was skipped because it touches history at the end of a session with
+other agents still writing, and it buys nothing the repo needs. None of those
+objects was ever pushed. Run it later if the local `.git` size matters.
+
+Every path above is in `.gitignore`, so none of this changed the repo at
 `StarKnightt/gas-station-highway`.
 
 ---
