@@ -1,0 +1,71 @@
+name: Deploy to GitHub Pages
+
+# The `push` trigger is deliberately absent, not forgotten. GitHub Pages cannot
+# serve from a private repository on this account's plan, so until either the
+# repo is made public or the plan changes, every push would produce a failing
+# check on a tree that seven agents commit to. Run it by hand from the Actions
+# tab meanwhile, and add this back when Pages is actually enabled:
+#
+#   push:
+#     branches: [main]
+#
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it, so a rapid sequence of
+# pushes cannot leave the site half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # Playwright is a devDependency used only by the capture harnesses, which
+      # need a GPU and do not run here. The package still has to be installed
+      # because `pnpm build` needs vite and typescript from the same tree, so
+      # the browser download is skipped rather than the dependency omitted.
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # `pnpm build` is `tsc --noEmit && vite build`, so a type error fails the
+      # deploy rather than publishing a stale bundle.
+      - name: Typecheck and build
+        run: pnpm build
+
+      - name: Check the shader injection still holds
+        run: node tools/shaderlint.mjs
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
