@@ -407,7 +407,13 @@ export function makePineShoot(size = 256, seed = 5001, dead = false): THREE.Data
     }
   };
 
-  const browning = dead ? 0.92 : 0.08;
+  // The sub-card half of the warm-patch complaint. Whole dead cards dominate
+  // the tan area (52% of it, in 22 card-scale regions), and that rate is cut
+  // where the cards are placed; this is the residue inside a live shoot. A live
+  // pine shoot does carry some second- and third-year needles going over, so
+  // this is reduced rather than removed — 0.05 is roughly one browned needle in
+  // twenty, which is what a healthy shoot looks like at the end of summer.
+  const browning = dead ? 0.92 : 0.05;
   drawShoot(0, 1, 0, 1, browning);
   // Two side shoots forking off, which is what gives the card a silhouette
   // rather than a single straight line of needles.

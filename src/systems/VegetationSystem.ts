@@ -17,6 +17,7 @@ import {
   applyFoliageBeautyOnly,
   applyFoliageTransmission,
   applyFoliageWind,
+  DAMP_RAMP_PINE,
   type FoliageExtras,
   type FoliageWindOptions,
   type TransmissionOptions,
@@ -87,7 +88,13 @@ import { DRIVEWAYS, PAD, ROAD, WIND } from "../site";
  *
  *   ?vegwind=   leaf wind. 0 is exactly still, 1 ships, 8 is the arm that
  *               proves the displacement is wired and that the shadows follow.
- *   ?vegdamp=   minification damping. 0 is an exact identity.
+ *   ?vegdamp=   minification damping gain. 0 is an exact identity everywhere.
+ *   ?vegramp=onset,width
+ *               where the damping ramp starts and how wide it is, in stops of
+ *               texels per pixel. The shipped 0.8,2.4 was fitted on scrub and
+ *               saturates on pine at every playable distance; this is the lever
+ *               that separates "the damping is wrong" from "the damping is
+ *               mis-ranged", which the gain alone cannot do.
  *   ?vegdepth=0 no custom depth materials. Both the documented fallback and
  *               the arm that measures the depth patch: at ?vegwind=0 it must
  *               be pixel-identical to shipping, because a depth material that
@@ -352,6 +359,8 @@ export class VegetationSystem implements GameSystem {
   private windGain = { value: 1 };
   /** `?vegdamp=` — the minification damping's control arm, same shape as the wind's. */
   private dampGain = { value: 1 };
+  /** `?vegramp=onset,width` — baked into the shader source, so not a uniform. */
+  private dampRampPine = DAMP_RAMP_PINE;
   /** `?vegdepth=0` — the fallback arm: wind on screen, no custom depth material. */
   private depthPatchEnabled = true;
   /** Beauty/depth pairs, checked after init. See `assertShadowSilhouetteParity`. */
@@ -687,12 +696,20 @@ export class VegetationSystem implements GameSystem {
     /**
      * `?vegdamp=` — the control arm for the minification damping.
      *
-     * The damping is the identity at mip 0 by construction, so a near-field
-     * difference between `?vegdamp=0` and shipping would be a bug in the ramp
-     * rather than a judgement about the effect. That is what makes this lever
-     * worth its two lines: it turns "does the dilation help the mid distance"
-     * into a subtraction rather than an opinion, and it does it without a
-     * rebuild.
+     * This comment used to say the damping was "the identity at mip 0 by
+     * construction, so a near-field difference would be a bug in the ramp". The
+     * first half is true of the expression and the second was the wrong
+     * conclusion to draw from it, because mip 0 is unreachable here: a 512-texel
+     * texture on a 0.30 m shoot is 1707 texels per metre, so a pine card samples
+     * at 23 texels per pixel from eight metres away and the ramp — which
+     * saturates at 9.2 — is at full strength on every pine card at every
+     * playable distance. Identity needs a card projecting to 294 px.
+     *
+     * The ramp's two constants were fitted on scrub and applied to pine without
+     * rechecking, and the verification that passed was run on grass cards at a
+     * completely different sampling rate. Measured on the crown: the damping
+     * takes the card from 6% of the way between a solid lump and a scattered one
+     * down to 2%.
      */
     const dampGain = num("vegdamp", 1);
     if (!Number.isFinite(dampGain) || dampGain < 0) {
@@ -700,6 +717,36 @@ export class VegetationSystem implements GameSystem {
     }
     this.dampGain.value = dampGain;
     this.report.dampGain = dampGain;
+
+    /**
+     * `?vegramp=onset,width` — the **pine** minification ramp, in stops of
+     * texels-per-pixel. Mid-storey and scrub keep the fitted default.
+     *
+     * A gain lever cannot answer the question this round asks. Turning the
+     * damping down uniformly weakens the mid distance, which is the one place it
+     * was landed to help and where it is worth 5.00% of the frame; the near
+     * field needs the ramp moved, not scaled.
+     *
+     * Pine only, because texels-per-pixel cannot separate the layers by
+     * distance: pine carries 512 texels on a 0.30 m shoot (1707 per metre) and
+     * scrub carries 256 on a 0.35 m card (731 per metre), so a pine crown at
+     * 14 m samples at 4.82 stops while scrub at 40 m samples at 5.11. One global
+     * ramp in texels-per-pixel must treat a near pine as a far scrub, and no
+     * choice of onset and width escapes that. The layers need their own
+     * constants, which is what makes this a per-call-site value rather than a
+     * scene-wide one.
+     */
+    const rampArg = q.get("vegramp");
+    let dampRamp = DAMP_RAMP_PINE;
+    if (rampArg !== null) {
+      const parts = rampArg.split(",").map(Number);
+      if (parts.length !== 2 || !parts.every((n) => Number.isFinite(n)) || parts[1] <= 0) {
+        throw new Error(`VegetationSystem: ?vegramp must be "onset,width" with width > 0, got "${rampArg}"`);
+      }
+      dampRamp = { onset: parts[0], width: parts[1] };
+    }
+    this.dampRampPine = dampRamp;
+    this.report.dampRampPine = [dampRamp.onset, dampRamp.width];
 
     /**
      * `?vegdepth=0` — wind on screen with no custom depth material.
@@ -1124,6 +1171,7 @@ export class VegetationSystem implements GameSystem {
             wind: pineWind,
             dampAtlasPx: tex.image?.width ?? 512,
             dampGain: this.dampGain,
+            dampRamp: this.dampRampPine,
           });
         const im = new THREE.InstancedMesh(cardGeo, mat, set.length);
         set.forEach((c, i) => {

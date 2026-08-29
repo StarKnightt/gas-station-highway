@@ -142,7 +142,51 @@ export interface FoliageExtras {
    * state the near field is already in.
    */
   dampGain?: { value: number };
+  /**
+   * Onset and width of the minification ramp, in stops of texels-per-pixel.
+   *
+   * These were literals — 0.8 and 2.4, fitted on scrub — until a measurement of
+   * the near pine crowns showed the ramp saturating at 9.2 texels per pixel
+   * against a crown that samples at 23. A 512-texel texture on a 0.30 m shoot is
+   * 1707 texels per metre, so a pine card is minified at every playable
+   * distance and the ramp reaches identity only when a card projects to 294 px.
+   * "Identity in the near field" was true of the population it was fitted on and
+   * false of the one it was applied to.
+   *
+   * Baked into the shader source rather than passed as a uniform, so sweeping
+   * them costs nothing at run time; `customProgramCacheKey` carries them because
+   * changing them changes the GLSL.
+   */
+  dampRamp?: { onset: number; width: number };
 }
+
+/** The ramp the scrub was fitted with, and the default for everything but pine. */
+export const DAMP_RAMP_DEFAULT = { onset: 0.8, width: 2.4 };
+
+/**
+ * The pine crown's own ramp, and a correctness fix rather than an enhancement.
+ *
+ * `DAMP_RAMP_DEFAULT` was fitted on scrub and applied to pine without
+ * rechecking, and the two populations sample at rates an order of magnitude
+ * apart. The result was that every pine card at every playable distance sat at
+ * full damping, so the near crown got the far crown's alpha dilation and
+ * roughness clamp — a distance term that never engaged.
+ *
+ * 5.2 is measured, not fitted by eye. Rasterising a 13 m pine through a
+ * ground-level pose and taking the area-weighted texel footprint over its 6528
+ * card triangles gives p5 4.58, median 5.23, p95 6.05 stops. An onset of 5.2
+ * therefore leaves about half the near crown at zero damping while a
+ * mid-distance crown, three times further out and so 1.6 stops higher, still
+ * runs at ~80%. Both ends were then measured on the frame: 0.6% of crown
+ * fragmentation recovered in the near field against 0.001 points of
+ * mid-distance sky gap, which is the far-field protection this was landed for.
+ *
+ * The near-field gain is small, and that is the honest finding rather than a
+ * disappointing one — the blob is the card's outline, not the alpha inside it,
+ * so unsaturating the damping was never going to fix it. This lands because the
+ * expression was wrong, not because it makes the crowns better.
+ */
+export const DAMP_RAMP_PINE = { onset: 5.2, width: 2.0 };
 
 /**
  * Everything that gets injected into a foliage material, installed through one
@@ -162,6 +206,7 @@ function installFoliagePatch<T extends THREE.Material>(
   const opts = parts.transmission;
   const wind = parts.extras?.wind;
   const atlasPx = parts.extras?.dampAtlasPx;
+  const ramp = parts.extras?.dampRamp ?? DAMP_RAMP_DEFAULT;
 
   const windUniforms = wind
     ? {
@@ -288,7 +333,7 @@ function installFoliagePatch<T extends THREE.Material>(
       );
     }
 
-    if (atlasPx) installMinificationDamp(shader);
+    if (atlasPx) installMinificationDamp(shader, ramp);
 
     if (!opts) return;
 
@@ -363,7 +408,9 @@ function installFoliagePatch<T extends THREE.Material>(
     "foliage-v3" +
     (opts ? "-t" : "") +
     (wind ? "-w" : "") +
-    (atlasPx ? "-d" : "");
+    // The ramp constants are substituted into the source, so by the rule stated
+    // above they belong here — unlike every uniform, which does not.
+    (atlasPx ? `-d${ramp.onset.toFixed(3)},${ramp.width.toFixed(3)}` : "");
   mat.customProgramCacheKey = () => key;
   mat.needsUpdate = true;
   return mat;
@@ -456,7 +503,10 @@ export function applyFoliageBeautyOnly<T extends THREE.Material>(mat: T, extras:
  * full-strength specular lobe is aliasing rather than noise, so it does not
  * average away between frames. It sparkles.
  */
-function installMinificationDamp(shader: { fragmentShader: string }): void {
+function installMinificationDamp(
+  shader: { fragmentShader: string },
+  ramp: { onset: number; width: number }
+): void {
   if (!shader.fragmentShader.includes("#include <map_fragment>")) {
     throw new Error(
       "vegTransmission: no <map_fragment> — the alpha dilation must run while " +
@@ -478,7 +528,7 @@ function installMinificationDamp(shader: { fragmentShader: string }): void {
       `#include <map_fragment>
        #ifdef USE_MAP
          vec2 vegFw = fwidth( vMapUv ) * uVegAtlasPx;
-         vegFar = clamp( ( log2( max( max( vegFw.x, vegFw.y ), 1.0 ) ) - 0.8 ) / 2.4, 0.0, 1.0 ) * uVegDampGain;
+         vegFar = clamp( ( log2( max( max( vegFw.x, vegFw.y ), 1.0 ) ) - ${ramp.onset.toFixed(3)} ) / ${ramp.width.toFixed(3)}, 0.0, 1.0 ) * uVegDampGain;
          diffuseColor.a = mix( diffuseColor.a,
                                smoothstep( 0.06, 0.26, diffuseColor.a ), vegFar );
        #endif`

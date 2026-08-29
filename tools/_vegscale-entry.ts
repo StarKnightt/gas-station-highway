@@ -108,10 +108,18 @@ export async function collectSites(): Promise<{
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(50, 16 / 9, 0.05, 3000);
+  // Taken from the shipping tier factory rather than written out here. The tier
+  // gating landed at 14:34 and reads `quality.transmission` and
+  // `quality.scatterDensity` in `init`; with no `quality` on the context every
+  // CPU tool that stands the system up threw, and none had been re-run since.
+  // A hand-built literal would have fixed the throw and quietly measured a
+  // scatter density no build ships.
+  const { tierSettings } = await import("../src/core/capability");
   const ctx = {
     game,
     scene,
     camera,
+    quality: tierSettings("high"),
     renderer: {
       capabilities: { getMaxAnisotropy: () => 8, isWebGL2: true },
       getPixelRatio: () => 1,

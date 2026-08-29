@@ -11148,3 +11148,146 @@ three measurements disagree, the useful move is to find the measurement that
 would vindicate the eye — I looked for periodicity and scale-narrowing
 specifically because that is what I thought I was seeing, and their absence is
 worth far more than the agreement of the statistics I already had.
+
+## A sampling-ratio argument is not symmetric, because the card's own outline is the blob
+
+Halving the foliage card was refused with a ratio: 23 texels per pixel becomes
+46, so each smaller card is a worse-resolved lump. That refutation appears to
+run backwards just as well — **double the card and the ratio falls to 11.5, so
+the shoot's internal structure should start surviving the reduction, and the
+count falls instead of rising.** It is also what jungle-trail did on purpose.
+It is wrong, and monotonically so.
+
+Rasterising one 13 m pine through a ground-level pose, thinning the count as
+card size rises so crown coverage is roughly held:
+
+| card | on screen | texels/px | cards | coverage | boundary | fragmentation | blob unit |
+|---|---|---|---|---|---|---|---|
+| 0.10 m | 6 px | 80.9 | 2973 | 9.5% | 9496 | 12.65% | 0.12 m |
+| 0.15 m | 9 px | 56.7 | 2293 | 12.0% | 8584 | 9.20% | 0.19 m |
+| 0.21 m | 13 px | 40.5 | 1573 | 16.6% | 8712 | 7.00% | 0.27 m |
+| **0.30 m** | **18 px** | **28.3** | **1088** | **20.0%** | **8096** | **5.51%** | **0.35 m** |
+| 0.42 m | 25 px | 20.2 | 790 | 23.5% | 6590 | 3.81% | 0.45 m |
+| 0.60 m | 36 px | 14.2 | 526 | 30.1% | 6608 | 3.19% | 0.51 m |
+| 0.90 m | 54 px | 9.4 | 377 | 44.4% | 5280 | 1.94% | 0.55 m |
+
+**Every metric moves the wrong way as the card grows.** The blob unit tracks
+card size nearly one-for-one, fragmentation falls by two thirds, coverage rises
+to 44% — a more solid, coarser, lumpier crown at every step out to 3x.
+
+The reason the argument does not reverse: **the visible lump is the card's
+outline, not the alpha inside it, and the internal structure never catches up.**
+Even at 9.4 texels per pixel a 4.3-texel needle is 0.46 px, still sub-pixel. To
+resolve one needle the card must reach roughly 2 m across, at which point the
+blob unit is 2 m rather than the 0.35 m being complained about. There is no
+size at which the trade wins, because the thing being bought arrives six times
+slower than the thing being sold.
+
+Two further pieces. **The card-size sweep is the only change measured all
+evening that moves the blob unit at all** — downward, 0.35 m to 0.19 m at 0.15 m
+cards — and no damping setting touched it. And **the count scales as
+1/cardSize, not 1/cardSize², because `step` is a one-dimensional walk along a
+branch while the card's area is two-dimensional**, which is why coverage
+collapses from 20.0% to 12.0% in that same column. Holding coverage while
+shrinking therefore does cost close to 4x the cards, so the original refusal
+stands — but it stood on a number that had not been derived, and the derivation
+is the part worth keeping.
+
+**jungle-trail's larger-and-fewer choice is a far-field argument and does not
+transfer.** Out there the failure is sky-speckle between cards and coverage held
+in big shapes is the fix. In the near field the blob unit *is* the complaint, so
+the same move is precisely backwards.
+
+## Registering the target caught the wrong object for the fourth time today
+
+Interwhorl stem shoots were approved to fix an observation nobody disputed —
+85% exposed trunk from a ground-level pose — and were declined by their own
+pre-registered metric before a single pixel was captured.
+
+**The 85% was the wrong population.** It came from scanning a column down the
+visible trunk, which from a ground-level pose is mostly the self-pruned lower
+pole *below* the live crown, where bare wood is correct and covering it would
+be a different error. Rasterising the wood mesh with a depth buffer and asking
+whether foliage covers each drawn bark pixel gives **17.0% visible bark**, not
+85%.
+
+**And the exposure is not on the stem.** Split radially from the axis rather
+than by height — a branch inside the live crown is at crown height but is not
+stem, and tagging by height silently merges the two populations the complaint
+distinguishes:
+
+| | HEAD | with stem shoots |
+|---|---|---|
+| stem inside the live crown | 26.4% bare | 24.9% |
+| branches, all heights | 16.5% bare | 15.9% |
+| longest unbroken run | 83 px (1.38 m) | 83 px |
+| runs 40 px or longer | 3 | 3 |
+| share of bare bark in those runs | 45% | 45% |
+
+**Three runs carry 45% of all bare bark, and they are 0–18% stem.** They are
+branch wood. Shoots on the stem cannot reach them, which is why the longest run
+does not move by one pixel for 3.8% more instances.
+
+The transferable part is not the pine. **"Long stretches of naked pole" is a
+claim about run length, and exposure area cannot confirm or refute it** — a tree
+can be 17% bare and still read as sticks if the 17% is in three unbroken
+lengths, or read as full if it is in two hundred short ones. Here it was both:
+204 runs, of which three carry nearly half. Measuring the area would have said
+the tree was fine; measuring the runs says where the fix has to go. **Pick the
+statistic whose shape matches the percept's shape**, and if the percept is about
+extent, area is the wrong moment of the distribution.
+
+## A constant fitted on one population is an untested assumption wearing a number
+
+`DAMP_RAMP_DEFAULT` — onset 0.8 stops, width 2.4 — was fitted on scrub and
+applied to every foliage layer. It was landed with the claim that it is identity
+at mip 0 and provably cannot move the foreground. **It is at full saturation on
+every pine card at every playable distance**, so the near crown was getting the
+far crown's alpha dilation and roughness clamp, and the distance term never
+engaged for anything from eight metres out.
+
+Pine carries 512 texels on a 0.30 m shoot, 1707 per metre; scrub carries 256 on
+a 0.35 m card, 731 per metre. A pine crown at 14 m therefore samples at a higher
+rate than scrub at 40 m. **One global ramp in texels-per-pixel must treat a near
+pine as a far scrub, and no choice of onset and width escapes it** — the layers
+are not separated by the quantity the ramp is a function of. The fix is a
+per-layer constant, not a better global one.
+
+**The verification failed in the hardest possible way: it passed.** It was run
+on scrub within two metres, which is the one narrow band where the expression is
+genuinely zero. A check that samples the single region where the term is inert
+will confirm identity no matter how wrong the term is everywhere else.
+
+The replacement is measured rather than fitted by eye. Area-weighted over 6528
+card triangles through a ground-level pose, the pine's texel footprint runs p5
+4.58, median 5.23, p95 6.05 stops. **The head-on arithmetic that predicted 4.82
+sits at about the 18th percentile** — `fwidth` takes the worse axis, the cards
+are rolled at 0/60/120° and mostly seen at a slant, so a footprint computed
+head-on is a lower bound and randomly oriented cards do not live at the bound.
+That is why the first re-range under-delivered, and it is worth more than the
+re-range: **a per-pixel derivative quantity has a distribution, and reasoning
+about it from a single head-on case gets the tail wrong in a predictable
+direction.**
+
+## A tool that has not been run since a change is not a tool that works
+
+Every headless CPU tool in `tools/` threw for five hours and nobody noticed.
+Tier gating had started reading `quality.transmission` inside
+`VegetationSystem.init`, and the shared CPU entry built a context without a
+`quality` field — so `collectSites`, the pine geometry probes and the scale
+sweeps all died on `Cannot read properties of undefined`. Nothing was wrong with
+the tools; the thing they instantiate grew a requirement.
+
+This is the class of failure that hides best, because **a tool is only exercised
+when someone reaches for it, and the gap between a change and the next reach is
+unbounded.** The browser path was run continuously all afternoon and was fine.
+The headless path was run at 14:34 and again at 19:20.
+
+Two cheap defences, neither of which was in place. **A CPU entry that constructs
+a system should construct it the way the app does** — here that means calling
+`tierSettings(...)` rather than hand-rolling a partial context, so a new
+required field is a type error at build time instead of a runtime throw five
+hours later. And **anything that shares a constructor with the shipping path
+belongs in whatever runs on every change**, because the cost of one headless
+build in CI is far below the cost of discovering the breakage while trying to
+use the tool to diagnose something else.

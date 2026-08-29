@@ -496,7 +496,13 @@ export function buildPine(spec: PineSpec): PineBuild {
           lerp(0.94, 1.02, age) * ao,
           lerp(1.06, 0.82, age) * ao
         );
-        cards.push({ matrix: m, tint, dead: !live || rng() < 0.07 });
+        // Dead cards inside a live whorl, at 0.07, put 22 card-scale tan
+        // regions through the crown carrying 52% of its warm area — measured on
+        // the shipping frame, and read by the user as "saturated orange patches
+        // scattered through the green". Some dead needles low in a live crown
+        // are correct, so this is cut rather than removed: at 0.03 the same
+        // crown keeps a handful near the base and stops reading as patchy.
+        cards.push({ matrix: m, tint, dead: !live || rng() < 0.03 });
       }
     }
   }

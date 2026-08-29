@@ -28,6 +28,23 @@ export const SHOTS: Record<string, ShotPreset> = {
 
   // Three-quarter establishing view of the whole site.
   wide: { position: [-46, 12.5, -24], lookAt: [3, 0.4, 25], fov: 46 },
+
+  /**
+   * Standing under the west pines looking up into a backlit crown — the pose the
+   * user's foliage complaint was made from, which none of the presets above
+   * reaches. They were all authored for the station, the pumps or the asphalt,
+   * so every foliage measurement this project has taken was of a crown at
+   * middle distance or further.
+   *
+   * Derived rather than eyeballed: 14 m from the 13 m pine at (-33, 10), placed
+   * on the far side of it from the sun so the crown is backlit, and rotated 12
+   * degrees off the sun line so the disc sits beside the trunk rather than
+   * behind it. At fov 56 that puts the leader 14 degrees above centre and runs
+   * the trunk out of the bottom of the frame, and it carries the 9.8 m pine at
+   * (-38.5, 19.5) in near the right edge — the two-tree composition the
+   * screenshot shows.
+   */
+  crown: { position: [-21.5, 0, 18.0], eyeAbove: 1.65, lookAt: [-33, 8, 10], fov: 56 },
 };
 
 export const SHOT_NAMES = Object.keys(SHOTS);
