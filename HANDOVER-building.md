@@ -2808,3 +2808,43 @@ baseline of 6, and whether the pane's reflection at 82 deg drowns the print — 
 one way A0 could trade a blank rectangle for a worse defect. The probe is fixed,
 guarded and ready; it is one stance, one screenshot, no arms. **Not taking a
 second load without being told to.**
+
+## Handover 22 — PASS. The door notices carry print and nothing is railed
+
+Final load, 82 deg, one screenshot, no arms. Regions are the projected bounding
+boxes of the two meshes named `entry-door-notice`, inset 6 px.
+
+| mesh | box | depth | distinct codes | mean | sd | railed | named pixel |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `entry-door-notice[tabs]` | 160×393 | 0.70 m | **245** | 182.2 | 57.64 | **0.0%** | contains (1275,390) |
+| `entry-door-notice[community]` | 59×182 | 1.06 m | **179** | 175.5 | 38.28 | **0.0%** | contains (1085,570) |
+| `window-notice[hiring]` (control) | 33×200 | 1.96 m | 153 | 127.9 | 61.39 | 0.0% | — |
+
+**Distinct codes came off the blank baseline of 6 by a factor of thirty.** 245
+and 179 against 6, and both ahead of the unchanged storefront control at 153 —
+which is what should happen, since the door notices are nearer and resolve more
+of the same atlas.
+
+**The reflection question is answered, and it is the good answer.** Railed
+fraction is **0.0% on both**, with means of 182 and 175 against a 255 ceiling and
+standard deviations of 58 and 38. The pane's reflection at 82 deg does not drown
+the print and nothing is clipping. This was the one way A0 could have made things
+worse — a blank white rectangle traded for a blank white rectangle with extra
+steps — and it did not happen. No PARTIAL, no ship-with-blemish.
+
+**Both named pixels are covered, 2/2.** `(1275,390)` sits inside the real box, as
+predicted: the CPU projection put it 11 px outside because that projection
+ignores the 0.04 rad tape-skew, and the skew widens that edge by about 15 px. The
+measured box is 160×393 against a CPU prediction of 152×379 and a pre-change
+measurement of 156×392, so all three agree and the pixel Film complained about is
+the pixel that was sampled.
+
+`window-notice` returned three meshes rather than four because `tabs` is entirely
+behind the camera at this stance — exactly what the CPU projection predicted, and
+the last confirmation that the duplicated cells are not co-visible with their
+door twins from the stance the complaint came from.
+
+**This closes the white rectangle.** It ran from "missing map or blown exposure"
+through a wrong object, a wrong owner and two instrument faults, to two blank
+quads taped to the outside of a door — and the fix was one character of position
+and eight lines of atlas binding.

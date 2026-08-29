@@ -10814,3 +10814,26 @@ hypothesis about *where* the feature lives is wrong, every box reports honestly
 and the ensemble misleads. **Whole-frame first to find where the change landed,
 fixed boxes second to judge it** — the sweep costs a second and it is the only
 step that can tell you your regions are in the wrong place.
+
+## Case 91 — The angular-size number that excluded the wrong object confirmed the right one
+
+Worth recording as an outcome rather than a lesson, because the discriminator
+earned it twice.
+
+`box height / viewport height × 2 × range × tan(fov/2)` was introduced to
+*exclude* a candidate: a troffer that matched on "flat, bright, not
+reflection-driven" could not also match on angular size, so the value match was
+not an identification. The same line then **confirmed** the real object — a quad
+authored 0.29 m tall, projecting 392 px at 0.70 m, where the formula says 0.297 m
+— and did it from the source code and the picture independently, with no load
+required.
+
+**A discriminator that can only reject is worth less than one that can also
+confirm.** Angular size does both because it is a single number that the
+geometry, the projection and the photograph all have to agree on, and it is
+computable on CPU from constants. Reach for it before reaching for the card.
+
+The confirmation held to the end: the fixed object measured 160×393 at 0.70 m
+against a CPU prediction of 152×379, and the pixel under investigation fell
+inside the measured box once the 0.04 rad tape-skew the CPU model omitted was
+accounted for.
