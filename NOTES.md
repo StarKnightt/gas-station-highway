@@ -11291,3 +11291,70 @@ hours later. And **anything that shares a constructor with the shipping path
 belongs in whatever runs on every change**, because the cost of one headless
 build in CI is far below the cost of discovering the breakage while trying to
 use the tool to diagnose something else.
+
+## The blob unit is a function of crown coverage, not of card size
+
+The card-size table appeared to contain one working lever: shrinking the
+foliage card from 0.30 m to 0.15 m took the blob unit from 0.35 m to 0.19 m,
+the only movement in that statistic all round. It was an artefact of the
+crown getting thinner, and holding coverage removes all of it.
+
+The table thinned the count as 1/cardSize, because `step` follows card size, so
+coverage fell from 20.0% to 12.0% as the cards shrank. Solving for the density
+that restores coverage instead:
+
+| card | density | cards/pine | scene cards | tri/frame | coverage | blob unit |
+|---|---|---|---|---|---|---|
+| **0.30 m** | **1.00x** | **1088** | **23710** | **285k** | **19.5%** | **0.34 m** |
+| 0.21 m | 2.29x | 4039 | 67823 | 814k | 21.6% | 0.32 m |
+| 0.15 m | 8.90x | 18703 | 316848 | 3802k | 17.1% | 0.31 m |
+| 0.10 m | 24.0x | 67178 | 1006140 | 12074k | 13.5% | 0.25 m |
+
+**At held coverage the blob unit moves 5% for 186% more cards.** The rows that
+show a real reduction are the rows where coverage collapsed, and one pairing
+settles it: 0.30 m at 19.5% coverage and 0.15 m at 19.9% both give a 0.34 m
+blob unit, at card sizes 2x apart. Sorting every row measured, in either
+sweep, by coverage rather than by card size puts them in order — 19.5% and
+19.9% both at 0.34 m, 17.0% and 16.0% both at ~0.25 m — and sorting by card
+size does not.
+
+So the crown's apparent lump size is set by **how much of the crown is filled**,
+not by what fills it. That is why nothing moved it: every change tried, from
+damping to needle width to card size, held coverage roughly constant by
+design, and the one quantity that governs it was the one being controlled for.
+
+The consequence is not a tuning result, it is an architectural one. **A crown
+cannot be made to read as finer without being made thinner**, on this
+primitive, at any price. Smaller cards do not buy resolution; they buy sparsity,
+and sparsity is what the eye was reading as finer.
+
+## The most salient bare wood was the part that is correct, and the model excluded it for being correct
+
+The CPU rasterisation put visible bark at 17.0% in 204 runs and reported the
+stem inside the live crown as 74% covered. The captured frame shows a pine
+whose trunk is a single unbroken black line, and that line is the most
+prominent thing in the crop by a wide margin. Both are accurate.
+
+Measured on the frame instead of the model: over the 9.3 m of stem in view the
+trunk is **48.8% bare, in 25 runs, one of which is 2.39 m long and carries 53%
+of all the bare rows**, at **178 codes of contrast** against the sky — bark at
+luminance 22.6 against sky at 200.4.
+
+That run spans 2.65 m to 4.88 m of tree height. `deadBelow` on a 13 m pine is
+4.42 m. **Four fifths of the worst-looking stretch on the tree is the
+self-pruned lower stem, where bare wood is botanically correct** — and the
+rasterisation excluded exactly that band, deliberately, on the grounds that
+covering it would be a different error.
+
+Three things worth keeping. **A model that excludes a region as correct cannot
+tell you that the region looks wrong**, and "correct" and "reads well" are
+independent; the exclusion was right for the question asked and hid the answer
+to the question that mattered. **Contrast is part of salience and no
+coverage statistic carries it** — 17% of bark exposed says nothing about a
+line at 178 codes against the brightest thing in the frame. And the cross-trunk
+luminance profile through that run is flat: 13 to 16 codes across 14 px of
+bark, with a 3-px rim on the sunward edge. A lit cylinder has a gradient.
+**The trunk does not read as a stick because there is too much of it showing;
+it reads as a stick because what shows has no internal shading.** That points
+at the bark's response to a low backlight rather than at the amount of foliage,
+and it is the cheaper thing to change.

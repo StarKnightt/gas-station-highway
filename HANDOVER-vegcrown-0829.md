@@ -91,6 +91,52 @@ That leaves the mechanism identified and no cheap lever against it. **The next
 real move is a different primitive, not a different constant** — and that is not
 an improvement to a finished build.
 
+## Second pass: both levers costed, P2 on a frame
+
+**Lever A — smaller cards — is dead, and the reason retires the whole
+direction.** The blob unit is a function of crown coverage, not of card size.
+The original table's improvement was the crown getting thinner: at held
+coverage, 0.30 m and 0.15 m cards give the same 0.34 m blob unit, and the
+cheapest coverage-held option costs +186% cards and +529k triangles per frame
+for a 5% move. Table in `NOTES.md`. A crown cannot be made to read as finer
+without being made thinner, on this primitive, at any price.
+
+**Lever B — shoots along the inner third of the longest branches — works and
+is affordable.** At `>=0.9 m branches, 8 shoots/m, 1.45x card size`:
+
+| | shipping | Lever B |
+|---|---|---|
+| pine foliage instances, scene | 23,710 | 28,347 (+19.6%) |
+| triangles per frame | 285k | 340k (+55k) |
+| VRAM | 1.72 MB | 2.05 MB |
+| programs / draw calls / textures | — | 0 / 0 / 0 new |
+| visible bark | 16.2% | 11.1% |
+| longest run | 83 px (1.38 m) | 58 px (0.96 m) |
+| runs 40 px or longer | 3 | 2 |
+
+Pushing to 14 shoots/m costs another 54k triangles for 0.8 more points and is
+past the knee. **Not landed** — it is a geometry change and wants the
+registered cast-coverage plan, which transfers unchanged.
+
+**P2 is real but subtle.** Two builds, control against treatment, one pose. The
+probe's own classifier was contaminated and the corrected measurement is in
+`tmp/tanfix.mjs`: over the 30.3% of crown pixels P2 actually changed, mean R−G
+falls 22.61 → 18.10; crown-wide the warm share falls 39.4% → 35.2% and the
+silhouette is unchanged at +0.03%. Card-scale warm regions 12 → 9, which failed
+the registered bar of a third — the warm regions percolate across the sunward
+crown rather than resolving into individual cards, so that statistic was
+counting connected territory rather than dead cards.
+
+**The frame carries a finding neither costing would have produced.** The trunk
+is 48.8% bare over the 9.3 m in view, in one unbroken 2.39 m run carrying 53%
+of it, at 178 codes of contrast. That run spans 2.65–4.88 m against a
+`deadBelow` of 4.42 m, so four fifths of the worst-looking stretch is the
+self-pruned lower stem where bare wood is correct — and the CPU model excluded
+exactly that band for being correct. The cross-trunk profile through it is flat,
+13 to 16 codes across 14 px. **The trunk reads as a stick because what shows has
+no internal shading, not because too much of it shows**, which points at the
+bark's response to a low backlight rather than at foliage count.
+
 ## Outstanding: one capture, not yet requested
 
 P2 is a look change and was to be judged on a frame. Two loads at the `crown`

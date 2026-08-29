@@ -7,8 +7,10 @@ dist/
 .shot-build/
 .shot*-build/
 # Per-harness build output. Each measurement harness builds into its own dir so
-# two of them running at once cannot serve each other's bundle.
+# two of them running at once cannot serve each other's bundle. `.veg*-` covers
+# the A/B harnesses that build one bundle per arm from a patched source tree.
 dist-*/
+.veg*-*/
 # Scratch. The agreed home for ad-hoc harness output, one subdirectory each:
 # a build pointed at a *shared* directory with emptyOutDir:true has already
 # deleted two agents' private bundles mid-round. tools/scratch.mjs refuses it.
