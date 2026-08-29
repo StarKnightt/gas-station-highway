@@ -151,3 +151,106 @@ and the tan-region classifier.
 its top level runs rather than exporting. It launched a build and a browser
 before it was killed. Use `node --check` for a syntax check on anything in
 `tools/`. `tools/cardclear.mjs` reports PASS as of the end of this round.
+
+---
+
+# Trunk shading: diagnosed, and it is not a defect
+
+Four candidate mechanisms were separated before anything was proposed. All four
+clear, and the fifth possibility — that the trunk is right and unflattering — is
+what the measurement supports.
+
+**It is not ambient-dominated, so it is not Lighting's.** `scene.environment` is
+a PMREM of the actual dawn sky at `environmentIntensity` 2.4, carrying real
+directional structure (blue overhead, warm toward the sun). The only genuinely
+uniform term is a `HemisphereLight` at intensity **0.10**, and a hemisphere
+light is itself directional in the axis that matters for a vertical cylinder.
+This is not the forecourt defect on a different surface; the trunk is receiving
+a distribution, not a constant. **Do not reopen Lighting on my account.**
+
+**The geometry can carry a gradient.** `sweepTube` writes outward radial normals
+per vertex and `buildPine` runs `computeVertexNormals` over the assembled wood,
+so the normals are smooth rather than faceted. The stem has **9 radial
+segments** and projects to **16 px** at this pose — about 1.8 px per segment,
+which is ample.
+
+**The albedo is not black.** Pine bark is authored at `PLATE [0.268, 0.226,
+0.182]` with cracks at `[0.098, 0.070, 0.052]`, a mid-brown around 0.23 linear.
+
+**And the gradient is there. I had trimmed it off.** The cross-trunk profile is
+`29 26 14 13 14 13 13 13 13 14 15 16 18 23 28 29`. I reported "13 to 16 codes
+across 14 px" by treating the bright ends as antialiasing into the sky. On a
+16 px cylinder the rim *is* the shading. Read whole the profile runs sRGB 12.9
+to 29.2, which in linear is 3.99e-3 to 1.24e-2 — a **3.12x gradient across the
+body**.
+
+The control makes it decisive and it cost nothing, because it was already in a
+capture taken for something else. **The two utility poles in the same frame** —
+different geometry, different material, different system, same sky and same tone
+curve — profile at **1.55x and 1.51x**. The pine trunk has **twice the
+cross-sectional shading of the scene's other cylinders.**
+
+**The honest outcome.** The sun is 11.5 degrees off the view axis and behind the
+tree, so the camera side of the trunk is its shadow side, and the correct
+appearance of a 0.5 m dark cylinder silhouetted against a 200-code dawn sky is a
+dark body with brighter rims. That is exactly what it is. It reads as a stick
+because 16 codes of correct gradient are invisible beside a 178-code contrast
+edge — not because the gradient is missing. **There is nothing to fix in the
+bark, and a change that produced a visible gradient here would be producing one
+the light is not delivering.**
+
+# Lever B, re-judged on the frame: I recommend declining it
+
+The instruction was to re-judge after the trunk, on the reasoning that a trunk
+with a gradient would stop reading as a black line and cheapen the lever. The
+trunk did not gain a gradient — it turned out to have one — so that particular
+discount does not apply. A different one does.
+
+Splitting the near pine's dark pixels on the captured frame:
+
+| | pixels | share of dark wood | share of tree |
+|---|---|---|---|
+| trunk column | 6,900 | 32.5% | 6.6% |
+| everything else | 14,328 | 67.5% | 13.8% |
+
+**Carry this caveat, it is load-bearing:** at a luminance cut, "everything else"
+is not branch wood. It is branch wood *plus* every shaded needle, card back and
+interior gap in the crown, and there is no way to separate them on a lit frame.
+The 67.5% is an upper bound and probably a loose one.
+
+The run statistics are what decide it. **Non-trunk dark pixels fall into 4,995
+horizontal runs whose longest is 45 px — 0.75 m — with only 45 runs of 20 px or
+more, carrying 8% of the total.** The trunk column, one contiguous vertical
+object, carries 32.5% by itself. **The frame does not show branch wood as long
+lines.** Whatever is dark out in the crown is speckle between needles, which is
+the texture of foliage rather than the outline of a stick.
+
+That is a real disagreement with the CPU costing, which found three runs of
+40 px or more carrying 45% of bare bark, and the costing is the one I trust
+less: it measured 4-connected runs through an **unlit** wood mask, where a run
+may snake in two dimensions and where dark foliage and dark bark are the same
+colour because there is no light to tell them apart.
+
+So Lever B buys **+19.6% instances and +55k triangles** to act on a statistic
+the frame does not corroborate, while the object that does drive the percept —
+one contiguous high-contrast vertical line — is correct and is staying. I do not
+think that is a good trade, and I would rather close the trees with the honest
+account than spend the instances. **It remains fully costed and implemented in
+scratch (`tmp/_vegPineB.ts`) if you disagree**; the registered cast-coverage
+plan transfers unchanged and it is one capture round away.
+
+# The line for the user
+
+**A crown cannot read finer without being thinner.** The blob unit is a function
+of crown coverage, not of card size: 0.30 m cards at 19.5% coverage and 0.15 m
+cards at 19.9% both give a 0.34 m blob unit, at card sizes 2x apart. Every
+change tried this evening held coverage constant by design, which is exactly why
+none of them moved the statistic. That is architectural. No triangle refund
+touches it, and there is no version of this crown that is both as dense and less
+lumpy.
+
+What did change: the pine damping ramp was fitted on scrub and had been running
+at full saturation on every pine card at every playable distance, which is now
+fixed as a correctness bug rather than shipped as an enhancement; and the warm
+patchiness is down, with the dead-card rate cut from 0.07 to 0.03 and needle
+browning from 0.08 to 0.05.

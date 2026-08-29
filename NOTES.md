@@ -11328,7 +11328,7 @@ cannot be made to read as finer without being made thinner**, on this
 primitive, at any price. Smaller cards do not buy resolution; they buy sparsity,
 and sparsity is what the eye was reading as finer.
 
-## The most salient bare wood was the part that is correct, and the model excluded it for being correct
+## Contrast is part of salience and no coverage statistic carries it
 
 The CPU rasterisation put visible bark at 17.0% in 204 runs and reported the
 stem inside the live crown as 74% covered. The captured frame shows a pine
@@ -11340,21 +11340,103 @@ trunk is **48.8% bare, in 25 runs, one of which is 2.39 m long and carries 53%
 of all the bare rows**, at **178 codes of contrast** against the sky — bark at
 luminance 22.6 against sky at 200.4.
 
-That run spans 2.65 m to 4.88 m of tree height. `deadBelow` on a 13 m pine is
-4.42 m. **Four fifths of the worst-looking stretch on the tree is the
-self-pruned lower stem, where bare wood is botanically correct** — and the
-rasterisation excluded exactly that band, deliberately, on the grounds that
-covering it would be a different error.
+**17% of bark exposed says nothing about a line at 178 codes against the
+brightest thing in the frame.** Area and salience are different quantities, and
+every foliage statistic this project has used measures the first. A percept
+driven by one high-contrast contiguous edge is invisible to all of them, which
+is why the crop settled in one look what three sweeps could not.
 
-Three things worth keeping. **A model that excludes a region as correct cannot
-tell you that the region looks wrong**, and "correct" and "reads well" are
-independent; the exclusion was right for the question asked and hid the answer
-to the question that mattered. **Contrast is part of salience and no
-coverage statistic carries it** — 17% of bark exposed says nothing about a
-line at 178 codes against the brightest thing in the frame. And the cross-trunk
-luminance profile through that run is flat: 13 to 16 codes across 14 px of
-bark, with a 3-px rim on the sunward edge. A lit cylinder has a gradient.
-**The trunk does not read as a stick because there is too much of it showing;
-it reads as a stick because what shows has no internal shading.** That points
-at the bark's response to a low backlight rather than at the amount of foliage,
-and it is the cheaper thing to change.
+Two consequences are logged separately because they generalise past this tree:
+the band the model excluded turned out to hold four fifths of the problem (see
+*Correct and ugly are different predicates*), and the "flat trunk" this entry
+originally went on to diagnose was a misreading of the profile (see *Trimming a
+cylinder's rim as an edge artefact*). **The trunk is correctly shaded.** What is
+true is only the first half: it reads as a stick because of its contrast and its
+continuity, not because of its shading or its share of the frame.
+
+## Trimming a cylinder's rim as an edge artefact deletes the only gradient it has
+
+I reported the pine trunk as flat — "13 to 16 codes across 14 px of bark" — and
+proposed that as a defect: a lit cylinder has a gradient and this did not. The
+claim was wrong, and the way it was wrong is reusable.
+
+The cross-trunk profile is `29 26 14 13 14 13 13 13 13 14 15 16 18 23 28 29`.
+I read the middle and dismissed the ends as antialiasing into the sky, because
+the object is 16 px wide and two pixels of ramp at each edge looks like
+filtering. **On a 16 px cylinder the rim is not an artefact, it is the
+shading** — the silhouette edges are where the surface turns to graze the sky
+and catch it, and cropping them leaves exactly the flat shadowed centre.
+
+Read whole, the profile spans sRGB 12.9 to 29.2. That is 16 codes and it looks
+like nothing, but sRGB near black is steep: in linear terms it is 3.99e-3 to
+1.24e-2, a **3.12x gradient across the body**. The two utility poles in the same
+frame — a different material on different geometry from a different system,
+under the same sky and the same tone curve — come in at **1.55x and 1.51x**.
+The trunk has twice the cross-sectional shading of the scene's other cylinders.
+
+Two things to carry. **Judge a ratio in linear, not in codes**, because a fixed
+number of sRGB codes means wildly different things at 13 and at 200, and every
+dark-object claim on this project is made at the bottom of the curve. And **a
+control cylinder already in the frame costs nothing** — the poles settled in one
+pass a question that would otherwise have gone to a material change, and they
+were sitting in a capture that had already been taken for something else.
+
+The four candidate mechanisms all cleared on inspection, which is worth
+recording so nobody re-opens them: the environment is a directional PMREM sky at
+intensity 2.4 against a hemisphere fill of 0.10, so this is **not** the
+ambient-dominated flatness Terrain found on the forecourt; `sweepTube` writes
+outward radial normals and `computeVertexNormals` smooths them; nine radial
+segments across 16 px is about 1.8 px each, ample to carry a gradient; and the
+bark albedo is a mid-brown at 0.23 linear, not black.
+
+**The honest outcome is that the trunk is right and unflattering.** The sun sits
+11.5 degrees off the view axis behind the tree, so the camera side of every
+trunk is its shadow side, and the correct appearance of a 0.5 m dark cylinder
+silhouetted against a 200-code dawn sky is a dark body with brighter rims —
+which is what it is. It reads as a stick because 16 codes of correct gradient
+cannot be seen next to a 178-code contrast edge, not because the gradient is
+missing.
+
+## A classifier can encode an assumption about the scene that the scene was chosen to break
+
+`isSky` was `blue >= green - 4 && luminance > 90`. That is a midday sky. This
+project is a dawn, and at 6 degrees of sun elevation the sky toward the sun is
+orange — so it failed the sky test, passed the warm test, and the largest "tan
+patch on the tree" came back as **32,193 px of sunrise**. The measured tan share
+of the crown was 62%.
+
+The rule was not sloppy. It is the correct rule for the sky most people have in
+mind, and it was written by someone who has spent a day looking at this sky.
+**Every default assumption in a tool is a claim about the scene, and this scene
+exists precisely because it is not the default one** — the whole piece is one
+unusual lighting condition, so any instrument carrying a generic prior about
+colour is carrying a prior the subject was selected to violate.
+
+The fix was to stop classifying by hue. Non-sky luminance above the horizon is
+cleanly bimodal here, with a valley at 160-175 holding 0.4% of pixels against
+3.6% and 12.0% in the bins above, so the split is **measured off the frame
+rather than assumed about the world**. Better still, an A/B needs no classifier
+at all: the pixels that differ between two arms are exactly the population the
+change acted on, which is a mask derived from the treatment instead of from a
+belief about what the treatment looks like.
+
+## Correct and ugly are different predicates, and a model that filters on the first cannot report the second
+
+The CPU rasterisation of the pine excluded the self-pruned stem below
+`deadBelow` from its exposure statistics, deliberately and with a comment: bare
+wood there is botanically correct and covering it would be a different error.
+That reasoning is sound and it hid the answer.
+
+On the captured frame the trunk is 48.8% bare over the 9.3 m in view, in one
+unbroken 2.39 m run carrying 53% of it. **That run spans 2.65 m to 4.88 m
+against a `deadBelow` of 4.42 m — four fifths of the worst-looking stretch on
+the tree is inside the band the model refused to look at.**
+
+This is the inverse of the wrong-object failures logged elsewhere in this file.
+Those measured the right statistic on the wrong thing. This measured the right
+statistic on the right thing and then removed the part that mattered, on a
+correctness criterion that was itself correct. **A filter justified by "this is
+supposed to be like that" is a filter on the answer, not on the noise**, and the
+only way to catch it is to look at the frame — which is the strongest argument
+this project has produced for capturing rather than computing, since neither
+costing could have found it at any level of effort.
