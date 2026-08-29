@@ -1,4 +1,43 @@
-# Pine crown round — card size, damping range, warm patches
+# Pine crown round — conclusion first
+
+**The crowns are as fine as this primitive makes them, and we can say exactly
+why.** The blob unit is governed by crown coverage, not by card size: 0.30 m
+cards at 19.5% coverage and 0.15 m cards at 19.9% both produce a **0.34 m
+blob**, at card sizes 2x apart. **A crown cannot read finer without reading
+thinner.** Every change tried this round held coverage constant by design, which
+is precisely why the statistic never moved through five levers. That is
+architectural rather than a budget question — no triangle refund touches it, and
+the only thing that would change it is a different foliage primitive, which is
+not a tuning pass.
+
+What did improve is real:
+
+- **The damping ramp now actually ramps.** It had been fitted on scrub and was
+  sitting at full saturation on every pine card at every playable distance, so
+  the distance term never engaged. Landed as a correctness fix, not an
+  enhancement.
+- **The tan patching is reduced** — dead cards `0.07 → 0.03`, needle browning
+  `0.08 → 0.05`.
+- **The leaves move**, from the previous round, with shadow parity proved rather
+  than assumed.
+- **The trunk was investigated and found correct.** That is a result, not a
+  non-result: it has a 3.12x linear cross-gradient against 1.55x and 1.51x for
+  the scene's utility poles, so it is not merely acceptable but better shaded
+  than its neighbours.
+
+Five levers costed, four refuted with numbers, none landed on a percept. The
+detail is below; the six refutations are worth reading only if someone wants to
+re-propose one of them.
+
+**Lever B (branch shoots) is declined.** It is costed and **one capture round
+from landing** if anyone later disagrees with the frame evidence — the recipe
+and the registered cast-coverage plan are written out in full in the Lever B
+section, because the scratch implementation did not survive (see the note there,
+which is worth reading on its own account).
+
+---
+
+# Pine crown round — the detail
 
 Follows `HANDOVER-vegwind-0829.md`. Everything here is CPU work plus the six
 loads already reported from `tools/vegdampprobe.mjs`. **No card was taken this
@@ -199,6 +238,17 @@ edge — not because the gradient is missing. **There is nothing to fix in the
 bark, and a change that produced a visible gradient here would be producing one
 the light is not delivering.**
 
+**This is the inverse of the day's usual failure.** The pattern all day was that
+the number was right and the object was wrong — the troffer inference, the
+region drawn on the wrong frame, the stem shoots aimed at the self-pruned pole.
+Here the object was right and the physical argument behind it was sound: a lit
+cylinder does have a gradient, and a flat one would have been a defect. **The
+number was trimmed.** Cropping a profile's ends as filtering noise is a routine
+and usually correct habit, and on a 16 px object it removes the signal. Worth
+keeping separate from the wrong-object cases, because the guard against it is
+different: not "derive the region from geometry" but "look at the whole profile
+before deciding which part of it is the object".
+
 # Lever B, re-judged on the frame: I recommend declining it
 
 The instruction was to re-judge after the trunk, on the reasoning that a trunk
@@ -235,9 +285,37 @@ So Lever B buys **+19.6% instances and +55k triangles** to act on a statistic
 the frame does not corroborate, while the object that does drive the percept —
 one contiguous high-contrast vertical line — is correct and is staying. I do not
 think that is a good trade, and I would rather close the trees with the honest
-account than spend the instances. **It remains fully costed and implemented in
-scratch (`tmp/_vegPineB.ts`) if you disagree**; the registered cast-coverage
-plan transfers unchanged and it is one capture round away.
+account than spend the instances.
+
+## Lever B: how to rebuild it, and why this section exists
+
+I said I would "leave it in scratch". **I could not, and the reason is worth one
+paragraph.** `tmp/` is in `.gitignore` and gets swept — the implementation I
+costed against, `tmp/_vegPineB.ts`, was already gone by the time I went to
+annotate it. *"Left in scratch" is not a place to leave anything*, and a
+handover pointing at an ignored directory points at nothing. The durable form of
+a deferred change is the recipe, so here it is.
+
+In `src/gen/vegPine.ts`, in the whorl branch loop, after the branch tube is
+pushed to `parts` and after the `if (stub) continue;` guard:
+
+- select branches with `len >= 0.9`
+- place shoots along the **inner third** of the branch path, `s` in `[0, 0.33]`
+- **8 shoots per metre** of that inner third, so `Math.round(len * 0.33 * 8)`
+- card scale **1.45x** the interwhorl shoot size, oriented off the branch
+  tangent rather than the trunk axis
+- they are ordinary live foliage cards: no new material, texture or draw call
+
+Measured cost: **+19.6% instances, +55k triangles**, visible bark 16.2% to
+11.1%, longest bare run 1.38 m to 0.96 m. Denser settings were swept and this
+one sits at the knee rather than past it.
+
+**The registered cast-coverage plan transfers unchanged** and must be run before
+landing: capture at `?vegwind=0` on the `crown` shot and check cast-pixel
+coverage, drawn-pixel coverage, the **cast-to-drawn ratio** — the one that
+matters, because it catches added cards casting at a different rate, which
+"shadows still exist" would not — and the peak per-pixel delta against the
+determinism floor of 13 at peak 1.
 
 # The line for the user
 
