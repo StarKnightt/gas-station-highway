@@ -39,24 +39,66 @@ import { assertHardwareGpu, launchOptions } from "./gpu.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WIDTH = 1600;
 const HEIGHT = 900;
-const PORT = 5151;
+
+/**
+ * Reads `--port N`, falling back to the default. Written out rather than
+ * inlined because the inline version I tried first read `argv[-1 + 1]`, which is
+ * the node executable's path, and quietly yielded `NaN` for the *default* case —
+ * the flag nobody passes being the one that breaks.
+ */
+function portArg(fallback) {
+  const i = process.argv.indexOf("--port");
+  if (i < 0) return fallback;
+  const n = Number(process.argv[i + 1]);
+  if (!Number.isInteger(n) || n < 1024 || n > 65535) {
+    throw new Error(`--port needs a port number, got ${JSON.stringify(process.argv[i + 1])}`);
+  }
+  return n;
+}
+// 5151 is this harness's assigned port; `--port N` exists so whoever is
+// scheduling a shared window can move it without editing this file.
+const PORT = portArg(5151);
 const BUILD_DIR = ".shot-build/walkprobe";
 const OUT_DIR = path.join(ROOT, "shots", "walkprobe");
-const READY_TIMEOUT_MS = 120_000;
+// The readiness budget lives at the call site now, at 420 s with 500 ms polling.
+// The 120 s constant that used to be here was both wrong and authoritative-
+// looking, which is the worse of the two problems.
 
 const argv = process.argv.slice(2);
 const DO_BUILD = !argv.includes("--no-build");
 /** Extra page query, no leading `?`. Used to re-run against the pre-fix behaviour. */
 const QUERY = (argv.find((a) => a.startsWith("--query=")) ?? "").slice(8);
+/**
+ * The reticle hides itself unless pointer lock is engaged, and headless Chromium
+ * cannot enter pointer lock — so without `?reticle=1` the hover ray is skipped
+ * every frame, `hover()` reports `samples: 0`, and its cost measures as a
+ * confident **0 µs**. A player has pointer lock and pays that cost on every
+ * frame, so measuring it without this flag would report the one number that is
+ * guaranteed wrong, in the direction that looks like good news.
+ */
+const RETICLE_QUERY = "reticle=1";
 /** The only adapter this machine is allowed to render on. */
 const REQUIRED_GPU = /RTX\s*4060/i;
 
 const checks = [];
 const notes = [];
 const deg = (r) => (r * 180) / Math.PI;
+/**
+ * `detail` is the *failure* message, so it is printed only on failure.
+ *
+ * It used to print on both, which produced lines like
+ * `PASS  Space actually leaves the ground   never reported airborne` and
+ * `PASS  the page exposes reticle state   window.__RETICLE is absent` — a pass
+ * verdict sitting next to a sentence flatly contradicting it. Anyone skimming the
+ * log reads the sentence, not the verdict. A log that has to be read carefully to
+ * avoid being misled is worse than a terser one.
+ *
+ * Where a number is worth seeing when the check passes, print it with
+ * `console.log` before the check, which most of this file already does.
+ */
 function check(ok, label, detail) {
   checks.push({ ok: !!ok, label, detail });
-  console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? `  ${detail}` : ""}`);
+  console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${!ok && detail ? `  — ${detail}` : ""}`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -320,19 +362,26 @@ async function main() {
    */
   const shoot = async (name, where, expect) => {
     if (!where) throw new Error(`walkprobe: ${name} was captured without stating where the camera is`);
-    await page.evaluate(() => {
-      const hud = document.getElementById("hud");
-      if (hud) hud.style.visibility = "hidden";
-      const load = document.getElementById("loading");
-      if (load) load.style.visibility = "hidden";
-    });
+    // `#reticle` joins the list because this run forces it on (see RETICLE_QUERY)
+    // and a canvas-clipped screenshot photographs whatever DOM overlaps the
+    // canvas box — which is how the HUD card ended up baked into `spawn.png`.
+    // The list is enumerated rather than "hide every overlay" so that a new
+    // overlay someone adds later shows up in a reference frame and gets noticed,
+    // rather than being silently suppressed by a rule written before it existed.
+    const OVERLAYS = ["hud", "loading", "reticle"];
+    await page.evaluate((ids) => {
+      for (const id of ids) {
+        const el = document.getElementById(id);
+        if (el) el.style.visibility = "hidden";
+      }
+    }, OVERLAYS);
     await page.locator("canvas").screenshot({ path: path.join(OUT_DIR, `${name}.png`), type: "png" });
-    await page.evaluate(() => {
-      const hud = document.getElementById("hud");
-      if (hud) hud.style.visibility = "";
-      const load = document.getElementById("loading");
-      if (load) load.style.visibility = "";
-    });
+    await page.evaluate((ids) => {
+      for (const id of ids) {
+        const el = document.getElementById(id);
+        if (el) el.style.visibility = "";
+      }
+    }, OVERLAYS);
     const at = await page.evaluate(() => {
       const c = window.__GAME.camera;
       return [c.position.x, c.position.y, c.position.z];
@@ -359,11 +408,27 @@ async function main() {
   page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
   page.on("response", (r) => r.status() >= 400 && problems.push(`http ${r.status()}: ${r.url()}`));
 
-  const url = QUERY ? `${base}?${QUERY}` : base;
+  const url = `${base}?${[RETICLE_QUERY, QUERY].filter(Boolean).join("&")}`;
   console.log(`\n[walkprobe] loading ${url} (interactive spawn path, no shot preset)`);
   await page.goto(url, { waitUntil: "load", timeout: 60_000 });
+  const readyFrom = Date.now();
   try {
-    await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: READY_TIMEOUT_MS });
+    /**
+     * 420 s, and `polling: 500` rather than the default rAF.
+     *
+     * A cold load measures 192-349 s here depending on what else is on the card,
+     * so the old 120 s budget could not survive one. And the default polling is
+     * `raf`, which cannot fire at all while `Game.start()` builds the world —
+     * that is one unbroken 242 s block of the main thread, measured — so a
+     * rAF-polled wait spends its whole budget without ever evaluating its
+     * predicate. Raising the timeout without changing the polling fixes half of
+     * it.
+     */
+    await page.waitForFunction(() => window.__SCENE_READY === true, null, {
+      timeout: 420_000,
+      polling: 500,
+    });
+    console.log(`  ready after ${((Date.now() - readyFrom) / 1000).toFixed(1)} s`);
   } catch (err) {
     if (problems.length) console.error(`[walkprobe] never became ready. Page said:\n    ${problems.join("\n    ")}`);
     throw err;
@@ -1338,6 +1403,545 @@ async function main() {
     check(doorReclosed !== fired.door.after?.door?.target, "a second click sends the door back", `target ${JSON.stringify(fired.door.after?.door?.target)} -> ${JSON.stringify(doorReclosed)}`);
   }
   await shoot("interaction", "at the cooler, mid-interaction");
+
+  /* ---- what a person does that a scripted route never does ---- */
+  /**
+   * Everything above this drives the player the way the film does: forwards,
+   * toward a thing it has already decided to look at. That is not how the scene
+   * will be used now that a person is going to walk it live and record it. The
+   * failures a route cannot find are the ones where the player is not
+   * cooperating — backing into geometry, sliding along a wall, clicking sky,
+   * standing on the wrong side of the thing they want, or heading for the
+   * horizon to see whether the world stops.
+   */
+  /* ---- the reticle, which is the whole of the interface ---- */
+  /**
+   * Interaction landed a centre-screen dot that brightens when the reach ray is
+   * on something usable, and built it from the same `pick()` call a click goes
+   * through at the same reach. That is the right construction, and it makes one
+   * claim testable that a separately-implemented reticle could not: **the dot
+   * cannot lie.** Bright must mean a click lands, dim must mean it does not.
+   *
+   * A dot that is bright where a click misses is worse than no dot at all. With
+   * nothing on screen a failed click reads as the player's aim; with a bright dot
+   * it reads as broken software, which is precisely the failure the reticle was
+   * added to prevent, inverted.
+   *
+   * So this walks to each of the three interactive things, brackets each one by
+   * standing where the dot is bright and where it is dim, and checks the click
+   * against the dot both ways round. The dim case matters as much: a dot stuck
+   * bright everywhere would pass every one-sided test.
+   */
+  console.log("\n[walkprobe] --- the reticle ---");
+
+  const dot = await page.evaluate(() => window.__RETICLE?.() ?? null);
+  check(dot !== null, "the page exposes reticle state", "window.__RETICLE is absent");
+  check(dot?.present === true, "index.html carries the reticle node", `present: ${dot?.present} — ${dot?.why}`);
+  check(dot?.shown === true, "the reticle is on screen under ?reticle=1", `shown: ${dot?.shown} — ${dot?.why}`);
+
+  /**
+   * The guard that has to come before any cost number is believed. `samples` is
+   * how many frames actually ran the hover ray; if the flag failed to take, this
+   * is zero and the mean cost is a division that reports 0 µs — a measurement of
+   * nothing, wearing the units of good news. Same shape as the three wrong-layer
+   * checks filed tonight, so it is asserted rather than assumed.
+   */
+  const hoverPre = await page.evaluate(() => window.__INTERACT.hover());
+  check(
+    hoverPre.active === true && hoverPre.samples > 0,
+    "the hover ray is actually running, so its cost can be measured",
+    `active: ${hoverPre.active}, samples: ${hoverPre.samples} — a 0 µs reading here would be meaningless`
+  );
+
+  const agree = await page.evaluate(async () => {
+    const W = window.__WP;
+    const I = window.__INTERACT;
+    const out = { cases: [], costUs: 0, samples: 0 };
+
+    /**
+     * Stand, aim, settle, then read the dot and click. The dot is read *before*
+     * the click, because a click changes the world and the question is whether
+     * the dot predicted what the click would do.
+     */
+    const bracket = async (label, at, aim, expectReach) => {
+      W.place(at[0], at[1], aim[0], aim[2] ?? aim[1]);
+      W.cam.lookAt(aim[0], aim[1], aim[2] ?? aim[1]);
+      await W.frames(10);
+      const before = window.__RETICLE();
+      const hover = I.hover();
+      const hit = I.click();
+      await W.frames(6);
+      out.cases.push({
+        label,
+        expectReach,
+        reach: before.reach,
+        why: before.why,
+        hoverName: hover.target?.name ?? null,
+        clicked: hit ? hit.name ?? hit.kind ?? String(hit) : null,
+        at: [W.cam.position.x, W.cam.position.z],
+      });
+    };
+
+    /**
+     * Resolved from the services the systems actually publish, and **missing is
+     * a failure rather than a skip.** The first version of this asked for
+     * `pump.nozzle3`, which does not exist — `tryGet` returned null, the pump
+     * cases were quietly not run, and the phase would have reported all-pass
+     * having tested nothing. A guessed service name is the silent-skip form of
+     * the same wrong-layer mistake filed three times tonight.
+     */
+    const pumps = window.__GAME.tryGet("pumps");
+    if (!pumps || !pumps.length) throw new Error('reticle phase: no "pumps" service to aim at');
+    const door = window.__GAME.tryGet("building.entryDoor");
+    if (!door) throw new Error('reticle phase: no "building.entryDoor" service to aim at');
+    const v = new W.cam.position.constructor();
+
+    // In reach of a pump, then backed off well past the 2.2 m reach with the aim
+    // unchanged — the dot must go dim on distance alone.
+    const pump = pumps[pumps.length - 1];
+    const p = pump.position;
+    out.cases.push({ label: `${pump.name} at`, at: [p.x, p.z], note: true });
+    await bracket("pump, close", [p.x, p.z + 1.1], [p.x, p.y + 1.1, p.z], true);
+    await bracket("pump, too far", [p.x, p.z + 4.2], [p.x, p.y + 1.1, p.z], false);
+
+    const d = door.getWorldPosition ? door.getWorldPosition(v.clone()) : door.position;
+    await bracket("door, close", [d.x, d.z - 1.2], [d.x, d.y, d.z], true);
+    await bracket("door, too far", [d.x, d.z - 5.0], [d.x, d.y, d.z], false);
+    // Aimed at the sky from a spot with nothing in reach: the unambiguous dim
+    // case, and the one a player is in most of the time.
+    W.place(-2.0, 26.0, -2.0, 10.0);
+    W.cam.lookAt(-2.0, 60.0, 10.0);
+    await W.frames(10);
+    const sky = window.__RETICLE();
+    out.cases.push({
+      label: "aimed at empty sky",
+      expectReach: false,
+      reach: sky.reach,
+      why: sky.why,
+      hoverName: I.hover().target?.name ?? null,
+      clicked: I.click(),
+      at: [W.cam.position.x, W.cam.position.z],
+    });
+
+    // Cost over a stretch of ordinary walking, sampled fresh so it is not
+    // dominated by the standing-still frames above.
+    const base = I.hover();
+    W.key("keydown", "KeyW");
+    for (let i = 0; i < 90; i++) await W.frame();
+    W.key("keyup", "KeyW");
+    const after = I.hover();
+    out.costUs = after.costUs;
+    out.samples = after.samples - base.samples;
+    return out;
+  });
+
+  for (const c of agree.cases) {
+    if (c.note) {
+      console.log(`  pump nozzle at (${c.at[0].toFixed(2)}, ${c.at[1].toFixed(2)})`);
+      continue;
+    }
+    console.log(
+      `  ${c.label.padEnd(18)} dot ${c.reach ? "BRIGHT" : "dim   "} | hover ${String(c.hoverName).padEnd(22)} | ` +
+        `click ${JSON.stringify(c.clicked)} | ${c.why}`
+    );
+    check(
+      c.reach === c.expectReach,
+      `the dot is ${c.expectReach ? "bright" : "dim"} ${c.label}`,
+      `reach: ${c.reach} — ${c.why}`
+    );
+    // The claim under test, both ways round.
+    if (c.reach) {
+      check(c.clicked !== null, `a bright dot means the click lands (${c.label})`, `click returned ${JSON.stringify(c.clicked)}`);
+    } else {
+      check(c.clicked === null, `a dim dot means the click does nothing (${c.label})`, `click returned ${JSON.stringify(c.clicked)}`);
+    }
+  }
+
+  console.log(`  hover ray: ${agree.costUs.toFixed(1)} µs mean over ${agree.samples} frames of walking`);
+  // 200 µs would be 0.2 ms of a 16.7 ms budget. Generous, because the point is
+  // to catch a raycast that walks the whole scene graph, not to tune it.
+  check(agree.costUs < 200, "the hover ray is cheap enough to run every frame", `${agree.costUs.toFixed(1)} µs/frame`);
+
+  console.log("\n[walkprobe] --- unscripted player behaviour ---");
+
+  const rude = await page.evaluate(async () => {
+    const W = window.__WP;
+    const cam = W.cam;
+    const out = {};
+    /** Hold a key for n frames while facing a fixed point, and report the track. */
+    const drive = async (code, from, look, n) => {
+      W.place(from[0], from[1], look[0], look[1]);
+      await W.frames(8);
+      const start = cam.position.clone();
+      let worst = 0;
+      W.key("keydown", code);
+      for (let i = 0; i < n; i++) {
+        await W.frame();
+        cam.lookAt(look[0], cam.position.y, look[1]);
+        if (W.solidAt(cam.position.x, cam.position.z) !== false) worst++;
+      }
+      W.key("keyup", code);
+      await W.frames(20);
+      return {
+        start: start.toArray(),
+        end: cam.position.toArray(),
+        moved: Math.hypot(cam.position.x - start.x, cam.position.z - start.z),
+        framesInsideSolid: worst,
+      };
+    };
+
+    // Backing into the storefront. The front wall is at z = 31.5, so stand north
+    // of it looking *away* and reverse: S is the one direction whose collision
+    // nobody has ever exercised, and a controller that resolves only along the
+    // facing direction passes every forward test and walks backwards through
+    // walls.
+    out.backIntoWall = await drive("KeyS", [-2.0, 30.4], [-2.0, 20.0], 200);
+    // Sliding along the same wall sideways.
+    out.strafeWall = await drive("KeyD", [-2.0, 31.0], [-2.0, 40.0], 240);
+    // Heading for the horizon. Nothing should fall through, and the surface
+    // height must stay a number the whole way.
+    out.leaveMap = await drive("KeyW", [0, 20.0], [0, -400.0], 420);
+    out.farSurface = W.surface(cam.position.x, cam.position.z);
+    out.farY = cam.position.y;
+
+    // A click on nothing. This has to be a clean no-op: a person will click at
+    // the sky, at the ground, and at a wall long before they click a pump.
+    W.place(-2.0, 26.0, -2.0, 10.0);
+    cam.lookAt(-2.0, 60.0, 10.0);
+    await W.frames(4);
+    /**
+     * Only the fields a click could change. The first version stringified the
+     * whole snapshot, which carries `t` and the pump's running gallons — both
+     * advance every frame on their own — so it reported "state moved on a miss"
+     * on every run, for a scene that was behaving correctly. A comparison is only
+     * a test if the things being compared are the things under test.
+     */
+    const digest = () => {
+      const s = window.__INTERACT.state();
+      return JSON.stringify({
+        door: s.door?.target ?? null,
+        coolers: s.coolers?.map((c) => c.target) ?? null,
+        bottle: s.bottle?.carried ?? null,
+        pumpRunning: s.pump?.running ?? null,
+      });
+    };
+    const before = window.__INTERACT ? digest() : null;
+    out.skyClick = window.__INTERACT ? window.__INTERACT.click() : "no __INTERACT";
+    await W.frames(4);
+    out.stateUnchangedAfterSkyClick = before === (window.__INTERACT ? digest() : null);
+
+    // The wrong side of the shop wall, aimed at the cooler through it. Reach is
+    // 2.2 m and the cooler sits against the back wall, so from outside it is
+    // within range as the crow flies — this is the check that you cannot work
+    // the fridge through the building.
+    const bottle = window.__GAME.tryGet("building.grabBottle");
+    if (bottle) {
+      const p = bottle.getWorldPosition(new cam.position.constructor());
+      W.place(p.x, p.z + 1.9, p.x, p.z); // outside the back wall, looking in
+      await W.frames(6);
+      out.throughWall = { at: [cam.position.x, cam.position.z], click: window.__INTERACT.click() };
+    }
+
+    // And the mouse. PointerLockControls only consumes movement while the
+    // pointer is captured, so an uncaptured mousemove must not move the view —
+    // otherwise the scene drifts whenever the player alt-tabs.
+    W.place(0, 26.0, 0, 40.0);
+    await W.frames(4);
+    const yaw0 = cam.rotation.y;
+    for (let i = 0; i < 10; i++) {
+      document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    }
+    await W.frames(4);
+    out.yawDriftUnlocked = Math.abs(cam.rotation.y - yaw0);
+    out.pointerLocked = document.pointerLockElement !== null;
+    return out;
+  });
+
+  const r = rude;
+  console.log(
+    `  reversing into the front wall: moved ${r.backIntoWall.moved.toFixed(2)} m, ` +
+      `ended z ${r.backIntoWall.end[2].toFixed(3)}, ${r.backIntoWall.framesInsideSolid} frames inside solid`
+  );
+  check(r.backIntoWall.framesInsideSolid === 0, "walking backwards does not push the body into geometry",
+    `${r.backIntoWall.framesInsideSolid} frames inside a blocker`);
+  check(r.backIntoWall.end[2] > 31.5 - 0.34, "reversing is stopped by the storefront, not through it",
+    `ended at z = ${r.backIntoWall.end[2].toFixed(3)} against a wall face at 31.5`);
+
+  console.log(
+    `  strafing along the front wall: moved ${r.strafeWall.moved.toFixed(2)} m, ` +
+      `${r.strafeWall.framesInsideSolid} frames inside solid`
+  );
+  check(r.strafeWall.moved > 1.0, "strafing along a wall actually travels", `${r.strafeWall.moved.toFixed(2)} m`);
+  check(r.strafeWall.framesInsideSolid === 0, "strafing does not push the body into geometry",
+    `${r.strafeWall.framesInsideSolid} frames inside a blocker`);
+
+  console.log(
+    `  heading off-site: moved ${r.leaveMap.moved.toFixed(1)} m to (${r.leaveMap.end[0].toFixed(1)}, ` +
+      `${r.leaveMap.end[2].toFixed(1)}), eye y ${r.farY.toFixed(2)}, ground there ${String(r.farSurface)}`
+  );
+  check(Number.isFinite(r.farSurface), "the ground is still defined well off-site", `groundHeight returned ${String(r.farSurface)}`);
+  check(Number.isFinite(r.farY) && r.farY > -50, "the player does not fall out of the world", `eye height ${r.farY}`);
+
+  console.log(`  clicking empty sky: ${JSON.stringify(r.skyClick)}`);
+  check(r.skyClick === null, "clicking nothing returns nothing rather than erroring", JSON.stringify(r.skyClick));
+  check(r.stateUnchangedAfterSkyClick, "clicking nothing changes nothing", "interaction state moved on a miss");
+
+  if (r.throughWall) {
+    console.log(`  from outside the back wall at (${r.throughWall.at[0].toFixed(2)}, ${r.throughWall.at[1].toFixed(2)}): ${JSON.stringify(r.throughWall.click)}`);
+    check(r.throughWall.click === null, "the fridge cannot be worked through the building wall", JSON.stringify(r.throughWall.click));
+  }
+
+  console.log(`  mouse: yaw drift with the pointer uncaptured ${r.yawDriftUnlocked.toExponential(1)} rad, pointer locked: ${r.pointerLocked}`);
+  check(r.yawDriftUnlocked < 1e-6, "the view does not move while the pointer is uncaptured", `${r.yawDriftUnlocked} rad of drift`);
+
+  /* ---- run and jump, which make collision three-dimensional ---- */
+  /**
+   * Everything above this was written when the player could only walk, and the
+   * collision field is a set of **height-less XZ rectangles resolved before the
+   * vertical integration**. The claim that follows from that is strong — a hop
+   * cannot clear a blocker or enter one, because the horizontal resolve does not
+   * know or care what `y` is — and it is the claim most worth attacking, because
+   * if it is wrong the failure is a player standing on top of a pump island or
+   * inside the building shell, which is worse than having no jump.
+   *
+   * So this does not check that jumping works. It tries to get inside something
+   * by jumping at it, from four directions, and at the two places where the
+   * vertical logic is doing something unusual: the shop threshold, where the eye
+   * is climbing at a clamped rate, and the raised interior floor, where the
+   * grounded test has to still return true or the player cannot jump indoors at
+   * all.
+   */
+  console.log("\n[walkprobe] --- run and jump ---");
+
+  const air = await page.evaluate(async () => {
+    const W = window.__WP;
+    const cam = W.cam;
+    /**
+     * `window.__PLAYER()`, not a service — and it carries its own liveness
+     * guard: `frames` is 0 until `update()` has run, which separates "the
+     * controller is disabled by a shot preset" from "the controller ran and the
+     * player is standing still". Every other field is identical between those
+     * two, and one of them makes all of them meaningless. Read it before
+     * anything else here is believed.
+     *
+     * The report is mutated in place rather than rebuilt, so it must be read
+     * live rather than snapshotted — a saved reference is not a saved value.
+     */
+    const P = () => (typeof window.__PLAYER === "function" ? window.__PLAYER() : null);
+    const first = P();
+    const out = { hasReport: !!first, reportFrames: first?.frames ?? 0, hops: [], run: null };
+
+    /** One hop from a standing start, reporting apex, airtime and re-landing. */
+    const hop = async (label, at, look) => {
+      W.place(at[0], at[1], look[0], look[1]);
+      await W.frames(30);
+      const y0 = cam.position.y;
+      const standing = W.surface(at[0], at[1]) + 1.65;
+      W.key("keydown", "Space");
+      let apex = y0;
+      let airFrames = 0;
+      let inside = 0;
+      let insideWhileAirborne = 0;
+      let t = 0;
+      const t0 = performance.now();
+      for (let i = 0; i < 150; i++) {
+        await W.frame();
+        if (i === 2) W.key("keyup", "Space");
+        const p = cam.position;
+        apex = Math.max(apex, p.y);
+        const rep = P();
+        if (rep?.airborne) {
+          airFrames++;
+          // The whole point: a body that is off the ground must still be
+          // excluded from every blocker's footprint.
+          if (W.solidAt(p.x, p.z) !== false) insideWhileAirborne++;
+        }
+        if (W.solidAt(p.x, p.z) !== false) inside++;
+        if (airFrames > 0 && rep && !rep.airborne) {
+          t = performance.now() - t0;
+          break;
+        }
+      }
+      W.key("keyup", "Space");
+      await W.frames(20);
+      const rep = P();
+      out.hops.push({
+        label,
+        standing: +standing.toFixed(3),
+        y0: +y0.toFixed(3),
+        apex: +apex.toFixed(3),
+        rise: +(apex - y0).toFixed(3),
+        airtimeMs: Math.round(t),
+        wentAirborne: airFrames > 0,
+        insideWhileAirborne,
+        inside,
+        landedY: +cam.position.y.toFixed(3),
+        landedGrounded: !!rep?.grounded,
+        at: [+cam.position.x.toFixed(2), +cam.position.z.toFixed(2)],
+      });
+    };
+
+    // Flat forecourt: the reference hop.
+    await hop("open forecourt", [-8.0, 22.0], [-8.0, 30.0]);
+
+    // At a pump island, aimed at it, running at it while hopping. If a hop can
+    // enter a footprint, this is where it happens.
+    const pumps = window.__GAME.tryGet("pumps");
+    if (pumps?.length) {
+      const p = pumps[pumps.length - 1].position;
+      W.place(p.x, p.z + 2.2, p.x, p.z);
+      await W.frames(10);
+      W.key("keydown", "ShiftLeft");
+      W.key("keydown", "KeyW");
+      W.key("keydown", "Space");
+      let inside = 0;
+      let closest = Infinity;
+      for (let i = 0; i < 200; i++) {
+        await W.frame();
+        cam.lookAt(p.x, cam.position.y, p.z);
+        if (W.solidAt(cam.position.x, cam.position.z) !== false) inside++;
+        closest = Math.min(closest, Math.hypot(cam.position.x - p.x, cam.position.z - p.z));
+      }
+      for (const k of ["ShiftLeft", "KeyW", "Space"]) W.key("keyup", k);
+      /**
+       * Wait for `grounded` rather than a fixed number of frames. Holding Space
+       * hops repeatedly, airtime is ~0.51 s, and a flat 30-frame wait is ~0.5 s —
+       * so the sample landed mid-hop and reported the eye 227 mm above standing
+       * height, which reads exactly like a player standing on top of the island.
+       * A fixed settle time that is the same length as the thing it waits for is
+       * not a settle.
+       */
+      for (let i = 0; i < 180; i++) {
+        await W.frame();
+        if (P()?.grounded) break;
+      }
+      await W.frames(6);
+      out.runJumpAtPump = {
+        inside,
+        closest: +closest.toFixed(3),
+        endedInside: W.solidAt(cam.position.x, cam.position.z) !== false,
+        endY: +cam.position.y.toFixed(3),
+        standY: +(W.surface(cam.position.x, cam.position.z) + 1.65).toFixed(3),
+      };
+    }
+
+    // Hopping at the storefront, and then on the raised interior floor, where the
+    // grounded test meets a surface that is not the exterior ground.
+    await hop("into the storefront", [-2.0, 30.6], [-2.0, 34.0]);
+    await hop("inside the shop", [-6.0, 33.2], [-6.0, 36.0]);
+
+    // Run speed. Terminal, so measured over the back half of a long straight.
+    W.place(-14.0, 14.0, -14.0, 30.0);
+    await W.frames(20);
+    W.key("keydown", "ShiftLeft");
+    W.key("keydown", "KeyW");
+    for (let i = 0; i < 90; i++) await W.frame();
+    const a = cam.position.clone();
+    const ta = performance.now();
+    for (let i = 0; i < 60; i++) await W.frame();
+    const dt = (performance.now() - ta) / 1000;
+    const dist = Math.hypot(cam.position.x - a.x, cam.position.z - a.z);
+    W.key("keyup", "KeyW");
+    W.key("keyup", "ShiftLeft");
+    await W.frames(30);
+    out.run = { mps: +(dist / dt).toFixed(3), seconds: +dt.toFixed(2) };
+    return out;
+  });
+
+  check(air.hasReport, "the player exposes a report a harness can read", "window.__PLAYER is absent");
+  check(
+    air.reportFrames > 0,
+    "the controller has actually run, so its report means something",
+    `report.frames is ${air.reportFrames} — the controller never updated, and every number below would be a default`
+  );
+
+  for (const h of air.hops) {
+    console.log(
+      `  hop ${h.label.padEnd(20)} rise ${(h.rise * 1000).toFixed(0)} mm | airtime ${h.airtimeMs} ms | ` +
+        `landed y ${h.landedY} (standing ${h.standing}) | inside solid ${h.inside} frames`
+    );
+    check(h.wentAirborne, `Space actually leaves the ground (${h.label})`, "never reported airborne");
+    // The load-bearing one. Height-less rectangles mean this must be zero.
+    check(
+      h.insideWhileAirborne === 0,
+      `a hop cannot put the body inside a blocker (${h.label})`,
+      `${h.insideWhileAirborne} airborne frames inside a footprint`
+    );
+    check(
+      h.landedGrounded,
+      `the player lands and is grounded again (${h.label})`,
+      `grounded: ${h.landedGrounded}, y ${h.landedY} against standing ${h.standing}`
+    );
+    // Landing must return to the surface it started from, not on top of anything.
+    check(
+      Math.abs(h.landedY - h.standing) < 0.06,
+      `the hop lands back at standing height (${h.label})`,
+      `landed ${h.landedY}, standing height ${h.standing}`
+    );
+  }
+
+  if (air.runJumpAtPump) {
+    const j = air.runJumpAtPump;
+    console.log(
+      `  running hop at a pump: closest ${j.closest} m, inside ${j.inside} frames, ` +
+        `ended ${j.endedInside ? "INSIDE" : "clear"}, y ${j.endY} against standing ${j.standY}`
+    );
+    check(j.inside === 0, "running and jumping at a pump island never enters its footprint", `${j.inside} frames inside`);
+    check(!j.endedInside, "the run-jump does not end up inside the island", "ended inside a blocker");
+    check(
+      Math.abs(j.endY - j.standY) < 0.06,
+      "the run-jump does not end up standing on top of anything",
+      `y ${j.endY} against standing height ${j.standY}`
+    );
+  }
+
+  console.log(`  run speed: ${air.run.mps} m/s over ${air.run.seconds} s`);
+  // 1.4 x 1.7 = 2.38. Same tolerance the walk check uses.
+  check(
+    Math.abs(air.run.mps - 2.38) < 0.12,
+    "holding shift reaches the intended 2.38 m/s",
+    `measured ${air.run.mps} m/s`
+  );
+
+  /* ---- the prompt, which must not name an action the click will not do ---- */
+  console.log("\n[walkprobe] --- the prompt ---");
+  const words = await page.evaluate(async () => {
+    const W = window.__WP;
+    const I = window.__INTERACT;
+    const out = [];
+    const pumps = window.__GAME.tryGet("pumps");
+    const p = pumps[pumps.length - 1].position;
+
+    // Before and after, at the same stance: the wording has to follow the state,
+    // or it is a label rather than a prompt.
+    W.place(p.x, p.z + 1.1, p.x, p.z);
+    W.cam.lookAt(p.x, p.y + 1.1, p.z);
+    await W.frames(12);
+    const first = I.hover();
+    const clicked = I.click();
+    await W.frames(40);
+    const second = I.hover();
+    out.push({ label: "a pump, before and after using it", first: first.prompt, clicked: !!clicked, second: second.prompt });
+
+    // And with nothing in reach.
+    W.place(-2.0, 26.0, -2.0, 10.0);
+    W.cam.lookAt(-2.0, 60.0, 10.0);
+    await W.frames(10);
+    out.push({ label: "nothing in reach", first: I.hover().prompt, clicked: null, second: null });
+    return out;
+  });
+
+  for (const w of words) {
+    console.log(`  ${w.label}: "${w.first}"${w.second === null ? "" : ` -> "${w.second}"`}`);
+  }
+  const pumpWords = words[0];
+  check(pumpWords.first.length > 0, "a reachable target has a prompt", "the prompt was empty in reach");
+  check(
+    pumpWords.first !== pumpWords.second,
+    "the prompt changes once the action has been taken",
+    `still reads "${pumpWords.second}" after the click, so it is a label rather than a prompt`
+  );
+  check(words[1].first === "", "nothing in reach means no prompt", `read "${words[1].first}"`);
 
   /* ---- what the collision test costs per frame ---- */
   console.log("\n[walkprobe] --- collision cost ---");

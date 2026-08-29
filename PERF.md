@@ -1990,6 +1990,160 @@ pass only at 5 of 5 with ready times inside 2× of the fastest
 
 ---
 
+### 13.9 The first load, reconciled: real, and it retro-labels every init figure here
+
+Three results, in the order they were established.
+
+### 13.9.1 I suspected my own instrument, tested it, and was wrong
+
+Both sequences behind the first-load finding came from harnesses I wrote, and both
+contained this:
+
+```js
+await page.goto(base, ...);
+if (i === 1) {                              // attempt 1 only
+  gpu = await assertHardwareGpu(page, ...); // allocates a SECOND WebGL2 context
+}
+await page.waitForFunction(() => window.__SCENE_READY === true, ...);
+```
+
+The clock starts before `goto`, so on attempt 1 and only attempt 1 the measured
+window contained an extra WebGL2 context allocation, requested with
+`powerPreference: "high-performance"`, while the scene was generating, on a card
+at 6–8 GB of 8. **"First load" and "the attempt that does an extra thing" were
+perfectly confounded across both sequences.**
+
+`tools/firstload.mjs` removes it: the GPU check happens once on a throwaway page
+before the loop, and all attempts run a byte-identical path.
+
+| Attempt | Ready |
+| --- | --- |
+| 1 | **279.1 s** |
+| 2 | 25.4 s |
+| 3 | 23.3 s |
+| 4 | 21.7 s |
+
+**The effect survived and grew — 12.0× against the median of the rest.** The
+confound was real and was not the cause. Four sequences now, first load worst
+every time: 279.1 s, 218.7 s, 171.9 s (timed out), and one hard crash.
+
+### 13.9.2 Why `stress.mjs` never saw it, and what that costs us
+
+`stress.mjs` launches a fresh browser and a fresh context every run and reaches
+ready in ~21–31 s, which looked like a direct contradiction. It is not:
+
+```js
+const gpuPage = await context.newPage();
+await gpuPage.goto(base, { waitUntil: "domcontentloaded", timeout: 60_000 });
+const gpu = await assertHardwareGpu(gpuPage, { tag: "stress" });
+await gpuPage.close();
+```
+
+**It loads the app in a throwaway page before the measured page exists.** The
+module script begins executing and the renderer starts compiling shaders; then the
+GPU assertion runs, then the page closes. The measured load is therefore the
+**second** load of the app in that browser process.
+
+So the correction to Film's claim is a reversal of its direction, with its
+conclusion intact in the part that matters. `browser.newContext()` gives a fresh
+*HTTP* cache, but the GPU program cache lives at the browser/GPU-process level,
+not the context level — so contexts 2..N inherit a warm one. It is not that every
+measurement was cold. **It is that every measurement was warm**, either because
+the harness pre-warms with a GPU-check page or because it measured a repeat.
+
+**Consequence, and it is the reason this section is not a footnote: every init
+figure this project has published was measured warm.** The 25.2 s load, the 8.3%
+shader-compilation share, the per-system init table, Terrain's 14.27 s. The
+relative attribution may well survive — Terrain being the largest share is a
+within-run comparison — but **the absolute numbers describe a regime the user
+never enters.** The figure for what the user experiences is 171.9–279.1 s, and it
+had never been measured because no harness here was capable of measuring it.
+
+**This is the partial retraction that was predicted, and it is owed.** My 8.3%
+shader figure is not withdrawn — it is correct for a warm load — but it was
+offered as an answer to "what is init made of", and it cannot answer that for the
+load that counts. The reload control in that round reported itself
+*inconclusive because the shader cache never warmed*; the reason it never warmed
+is now visible, and it is that the harness had already warmed it before the
+measurement began.
+
+### 13.9.3 The penalty is per-browser-process, not per-machine
+
+Available from data already collected, at no extra cost. Every fresh browser
+launch today paid it: 171.9 s, 218.7 s, 279.1 s, each in a different process,
+minutes apart on the same machine with the same driver.
+
+**So the warm state does not survive a browser process.** That rules out the
+NVIDIA driver's machine-level shader cache, which would persist, and points at
+Chrome's per-profile GPU program cache — which Playwright's `chromium.launch()`
+discards every time, because it uses a throwaway user-data-dir.
+
+**This is good news for the deliverable, and it supports the README change
+already made.** The user records in their own persistent Chrome profile, so they
+pay this once and keep the warm state across restarts. "Take the slow load before
+you record" is not a workaround for them — it is the whole fix, provided the
+profile persists.
+
+**Not established here: the mechanism.** Shader cache versus HTTP cache versus
+something else needs Film's condition 3 (same profile, HTTP cache bypassed via
+CDP), which discriminates them directly. That instrument is Film's and I am not
+duplicating it. What I can say is that the HTTP-cache explanation has to account
+for a bundle of two requests and a few MB, against a 250-second penalty.
+
+### 13.9.4 A fifth confirmation, from an agent that was not looking for it
+
+The loading-screen agent instrumented boot to weight a progress bar and measured,
+on a fresh profile via `launchPersistentContext`, **283.8 s cold against 30.1 s
+warm.** It was not testing this hypothesis, which makes it the cleanest
+corroboration available: **283.8 s against my 279.1 s is agreement to within
+1.7%**, from a different harness, a different profile mechanism, and a different
+purpose.
+
+Its warm loads under heavy GPU contention were 22.5, 25.7 and 30.1 s against my
+20.8–25.4 s on a quieter host, which puts a useful bound on the thing the
+quiet-host protocol exists to exclude: **contention costs a warm load roughly
+10–40%, not a factor.** That is worth having before the frametime run, because it
+says the frametime problem is not of the same kind as the load problem.
+
+### 13.9.5 Why none of my instruments could ever have found this
+
+The audit is unflattering and worth recording. **Every harness I have written
+samples strictly after `__SCENE_READY`:**
+
+| Harness | Ready wait | First sample |
+| --- | --- | --- |
+| `perf.mjs` | line 222 | screenshot, line 563 |
+| `shadow-type-ab.mjs` | line 132 | screenshot, line 171 |
+| `program-audit.mjs` | line 413 | `__GLSTAT`, line 466 |
+| `stress.mjs` | before the route | after ready |
+| `firstload.mjs` | the measurement | nothing during init |
+
+The good news is narrow: none of them can hit the trap the boot agent found,
+where **`page.screenshot` times out at 15 s during Terrain's single unbroken ~12 s
+main-thread block**, because that path waits on the main thread — a timeout there
+looks like a harness failure and not like a finding.
+
+The bad news is the same fact stated honestly: **init has been a black box with
+one number on it for this entire project, and that is why I never saw either the
+stall or the cold-load penalty.** My per-system init timings in `Game.ts` are
+wall-clock deltas around each `init()` call, which can report *how long* a system
+took but nothing about the *shape* of what it did — a 12 s unbroken block and 12 s
+of cooperative work are the same number to it.
+
+Two consequences I am adopting rather than recommending:
+
+1. **Sample from Node, not from the page, during init.** My `nvidia-smi` VRAM
+   sampler already does this and is immune by construction; the pattern
+   generalises. CDP `Page.startScreencast` and CDP metrics polling do not queue
+   behind the main thread, which is why the boot agent could see 771 compositor
+   frames across a 283.8 s load with a longest gap of 5.49 s.
+2. **Ask for that frame-arrival series rather than re-deriving it.** It is a
+   high-resolution map of where the process is genuinely stalled versus merely
+   slow, which is exactly what an init attribution needs and what a wall-clock
+   delta cannot provide. Requested; not yet in hand.
+
+---
+
 ## 14. The quiet-host protocol
 
 Written and **not run**: it needs an exclusive GPU window, which is the
@@ -2053,3 +2207,751 @@ builds from there, so a measurement is never taken against a tree being edited
 underneath it — **delete that directory when you are done**, or the repo holds a
 second stale copy of every source file. Teardown is wired to every exit path;
 `_perfkill.ps1` cleans up after a hard kill without touching sibling processes.
+
+## Vegetation's levers for a capability tier, with measured costs
+
+Added because the tier work will need numbers rather than guesses, and these were
+captured rather than estimated — 1600x900, from the forecourt centre and the
+store door, each layer switched off in turn on an RTX 4060.
+
+| lever | what it costs the frame | what dropping it costs the picture |
+| --- | --- | --- |
+| `?vdens=` (default 0.74) | scales every scrub layer, near and far | everything; the blunt instrument |
+| `roadClusters` = 34, `?vforce=nocorridor` | ~260 instances, no extra draw call, 1314 px | the along-road fringe past 60 m returns to 20-28 degree bare runs |
+| `gapClusters` = 16 | ~120 instances, no extra draw call | reopens an 18 m band across the highway at 44-62 m with no layer in it |
+| `farClusters` = 58 | ~440 instances, no extra draw call | the far country scatter; the original layer |
+| road fringe sheet, `?vforce=nofringe` | 4358 triangles, **1 draw call**, 10.4k px | far ground tone; the band reads as bare graded dirt |
+| sprigs, `?vforce=nosprig` | 3128 instances x 8 tri, 1 draw call | near-ground silhouette; the sheet alone reads as a stain |
+
+All three cluster counts are named constants in `scatterScrub` in
+`src/systems/VegetationSystem.ts`, adjacent, with the drop order and its
+consequences written beside them. The two `vforce` tokens echo `corridorOff` and
+`fringeOff` in `__VEGETATION`, so a tier experiment can assert the flag arrived
+instead of inferring it from a frame that looks the same.
+
+Cheapest first: `roadClusters`, then the fringe sheet's draw call, then
+`gapClusters`. The fringe sheet is the only one of the six that costs a draw
+call, and it is 4.4k triangles against the system's 738k.
+
+## 17. Capability detection and quality tiers
+
+The user's requirement: the build must detect the host and configure itself, so it
+runs on weak hardware rather than only on an RTX 4060. Everything this document
+had measured until now was measured on one card.
+
+`src/core/capability.ts` (new, mine), wired through `SystemContext.quality`.
+Three tiers. Verified by `tools/tiers.mjs`.
+
+### 17.1 The shader-compile mechanism, now measured from inside GL
+
+The boot agent's gap analysis attributed the cold load to shader compilation from
+the outside — ~262 s of a 284 s load sitting after the last `init()`. The tier
+harness measured the same thing from inside the GL layer, via `blockedMs` in
+`perf-instrument.js`, and it is not close:
+
+| Load | `blockedMs` (driver blocked in compile/link) | Total to ready | Share |
+| --- | --- | --- | --- |
+| Cold (first in a fresh browser) | **215,956 ms** | 234.9 s | **92%** |
+| Cold, second run, different tier first | **247,004 ms** | 268.7 s | **92%** |
+| Warm repeat | 2,003–2,404 ms | 21.6–23.9 s | ~10% |
+
+**That is a ~100x swing in driver compile time either side of a populated program
+cache, and it accounts for 92% of the cold load in both directions.** The
+hypothesis is now a measurement. It also reconciles the two figures that looked
+contradictory: 8.3% warm and ~92% cold are the same pipeline, and the earlier
+reload control that came back *inconclusive because the shader cache never
+warmed* was pointing at this the whole time.
+
+**The order confound, demonstrated twice by accident and then on purpose.** Tiers
+run sequentially in one browser, so the first one measured pays the cold penalty:
+
+- Run A, `high` first: high 234.9 s, medium 21.6 s, low 21.8 s.
+- Run B, `low` first: low 268.7 s, medium 23.9 s, high 23.2 s.
+
+**The penalty follows position, not tier.** Any harness that measures conditions
+sequentially in one browser and reads the first as a condition effect will
+attribute a 10x artefact to whatever happened to go first. `tools/tiers.mjs` now
+prints that warning above the table rather than beside it.
+
+### 17.2 What the tiers actually do, measured
+
+Verified with `node tools/tiers.mjs`, 1920×1080, 60 frames settled, tier forced
+via `?tier=`:
+
+| | high | medium | low |
+| --- | --- | --- | --- |
+| Reported tier matches request | yes | yes | yes |
+| Programs linked | 202 | **202** | **202** |
+| Texture + RBO memory | 737.6 MB | 497.6 MB | **437.6 MB** |
+| Triangles drawn | 7,891,985 | 6,627,033 | **5,521,377** |
+| Scatter instances | 83,996 | 50,884 | **21,924** |
+| Draw calls | 936 | 936 | 936 |
+| Shadow map | 8192² | 4096² | 2048² |
+| DPR cap / MSAA | 2 / on | 1.25 / on | 1 / off |
+
+Draw calls are identical by design: the density lever lowers
+`InstancedMesh.count`, and an instanced draw costs one call whatever the count.
+
+**Landed saving at low: 300 MB of GPU memory and 30% of drawn triangles**, with
+74% of scatter instances gone.
+
+### 17.3 The honest failure: the compile-time family is wired and inert
+
+**Programs are 202 at every tier.** The run-time family works; the compile-time
+family does not, and the compile-time family is the one that matters most.
+
+This is precisely the failure that was predicted: *a tier that cuts triangles
+while leaving the program count intact misses the thing that hurts most.* At 92%
+of a cold load, program count is what the user waits for, and **the low tier
+currently buys a weak machine nothing at all on first load** — only on frametime
+once it is running.
+
+The reason is structural rather than a bug. `shadowFilter`, `transmission`,
+`worldCapture` and `detailPatches` are exposed on `ctx.quality`, but **nothing
+reads them yet**, because the `onBeforeCompile` patch sites and material variants
+live in five other owners' files and they are converging. What I could reach from
+my own files, I took:
+
+| Lever | Applied from | Status |
+| --- | --- | --- |
+| DPR cap, MSAA | `Game.ts` constructor | working |
+| Shadow map size | `Game.ts` clamp before preallocation | working, −300 MB |
+| Shadow filter type | `Game.ts` `shadowMap.type` | working (source, not count) |
+| Scatter density | `Game.ts` `InstancedMesh.count` | working, −74% instances |
+| Anisotropy | via `setMaxAnisotropy` | working |
+| **PCSS patch family** | `LightingSystem` | **hook needed** |
+| **Transmission** | `Vegetation`, `Building` | **hook needed** |
+| **World capture** | `LightingSystem` | **hook needed** |
+| **Detail patches** | `TerrainSystem` | **hook needed** |
+
+### 17.4 The four hooks, for routing
+
+Each is a conditional around work that already exists. None changes the default
+path: at `high` every flag is the current behaviour, so a system that adopts the
+hook ships byte-identically on a 4060.
+
+```ts
+// LightingSystem — skip the PCSS onBeforeCompile patch entirely
+if (ctx.quality.shadowFilter === "pcss") { /* existing patch */ }
+
+// LightingSystem — cheap sky instead of a world capture into the env map
+if (ctx.quality.worldCapture) { /* existing capture */ } else { /* sky only */ }
+
+// Vegetation / Building — transmission is a large shader and an extra pass
+material.transmission = ctx.quality.transmission ? EXISTING_VALUE : 0;
+
+// TerrainSystem — applyWorldDetail's per-material variants
+if (ctx.quality.detailPatches) { /* existing applyWorldDetail */ }
+
+// Any system building a scatter layer — build fewer rather than drawing fewer
+const n = Math.round(AUTHORED * ctx.quality.scatterDensity);
+```
+
+The last one is worth more than it looks. My density lever lowers `count` **after**
+the instances have been generated and uploaded, so it saves frametime but not
+init time or memory. A system that builds fewer saves all three, and on a low tier
+that is generation work a weak CPU never has to do.
+
+### 17.5 What is measured and what is inferred
+
+Stated plainly because this is where it will break on a real user's machine.
+
+**Measured, on a 4060:** every figure in §14.2. Tier selection applying. The
+shadow clamp. The density lever. The 92% compile share.
+
+**Inferred, and untested:** every threshold in `classify()`. There is no potato
+PC here, and **you cannot test one on a 4060.** Specifically unvalidated:
+
+- That `MAX_TEXTURE_SIZE < 8192` implies a machine wanting `low`. Plausible, unverified.
+- That `deviceMemory <= 4` and `cpuThreads <= 4` are the right cut points. Guesses at the boundary, chosen to demote rather than promote.
+- **That the `low` tier is actually sufficient to run on integrated graphics.** Nothing here can establish that. It is 300 MB lighter and 30% fewer triangles, and it still compiles 202 programs — which on a slower compiler is the four-minute wait, worse.
+- Absence of `KHR_parallel_shader_compile` as a demotion signal. Directionally certain given §14.1, magnitude unknown.
+
+The honest summary: **the mechanism is verified, the classification is not.** A
+forced `?tier=low` is known to work and known to be lighter. Whether the automatic
+choice picks correctly on hardware nobody here owns is untested, which is why
+`?tier=` exists and why the tier is logged on one pasteable line.
+
+## 18. Suite-wide timeout audit: 27 readiness waits shorter than a cold load
+
+`tools/timeoutaudit.mjs` (new, re-runnable). Scans every harness for readiness
+and navigation timeouts and grades them against the worst cold load measured
+here, 302.5 s.
+
+**A timeout shorter than the thing being measured converts "slow" into "failed"
+and destroys the number** — and destroys it in the most misleading way available:
+a healthy build reports "never became ready" with an empty page console, which is
+indistinguishable from a shader link failure.
+
+### 18.1 The result
+
+119 timed sites across 41 harnesses. **27 fatal readiness waits in 26
+harnesses**, every one of them shorter than a load this project has already
+measured:
+
+| Timeout | Sites | Harnesses |
+| --- | --- | --- |
+| 90 s | 3 | `hotfix`, `lightProbe`, `shoot7` |
+| 120 s | 4 | `probe`, `shoot`, `soilprobe`, `walkprobe` |
+| 180 s | 4 | `audio`, `gpucheck`, `probe-winding` |
+| 240 s | 16 | `carenv` (×4), `envbind` (×2), `filmwalk`, `probe-rank`, `probe-unseen`, `shoot1`, `shoot3`, `shoot4`, `shoot5`, `shoot6`, `shootcar`, `tilescan`, `vegshadowprobe` |
+
+****The 240 s tier is the dangerous one, not the 90 s tier.** A 90 s budget fails
+every cold load and would have been noticed immediately as "this never works". A
+240 s budget sits *inside* the measured cold-load range of 221–302 s, so it fails
+intermittently and looks like flakiness rather than like a misconfiguration. That
+is the population of "lost rounds" reported across the project tonight.
+
+Retroactively this is consistent with, and is the most plausible explanation for,
+the two `page.goto` deaths in my own runs, Pumps' two crashed runs, Lighting's
+opaque HTTP failures, and the four rounds that wrote zero captures across three
+systems.
+
+### 18.2 Starved polling is a separate fault, and 26 harnesses have it
+
+`page.waitForFunction` defaults to `polling: "raf"`, and **rAF does not fire while
+the main thread is blocked.** So a rAF-polled readiness wait is starved during
+exactly the window it exists to observe. **32 sites across 26 harnesses.** Raising
+the timeout without also setting `polling: 500` fixes half the fault.
+
+### 18.3 Two claims I withdrew before publishing
+
+The first version of this audit reported **120 fatal sites**. That number was
+wrong three times over, and the corrections are worth more than the number:
+
+1. **It could not resolve named constants.** `timeout: READY_TIMEOUT_MS` read as
+   absent, so it graded `tiers.mjs` — which passes an explicit 420 s — as
+   inheriting Playwright's 30 s default. **A scanner that punishes good style and
+   calls it a defect is worse than no scanner.**
+2. **It read documentation as code.** A `waitForFunction` inside `firstload.mjs`'s
+   header comment, showing callers what to do, was reported as a live site.
+3. **It graded navigation like readiness, which overstated the problem ~3x.**
+   `src/main.ts` calls `game.start()` **without awaiting it at top level**, so the
+   module finishes evaluating immediately and `load` fires long before init
+   completes. Of 73 navigation sites, 41 use `waitUntil: "load"`, 30
+   `"domcontentloaded"`, 4 `"commit"` — all early. **None of them waits on a cold
+   init**, so a 60 s navigation timeout there is untidy, not fatal.
+
+The tool now reports unresolvable identifiers as `UNKNOWN` rather than grading
+them, on the same principle as the null-measurement rule: a verdict about
+something never measured is not a verdict.
+
+### 18.4 Fixed, and by whom
+
+**Mine, fixed:** `perf`, `stress`, `program-audit`, `texture-audit`, `bloom-cost`,
+`shadow-type-ab`, `budget`, `firstload`, `devgate`, `tiers`, `coldload` — all
+readiness waits now `timeout: 420_000, polling: 500`.
+
+**Not mine, reported:** the 26 harnesses in §15.1. The fix is two edits per site
+and needs no coordination:
+
+```js
+await page.waitForFunction(() => window.__SCENE_READY === true, null,
+  { timeout: 420_000, polling: 500 });
+```
+
+`node tools/timeoutaudit.mjs` exits non-zero while any fatal readiness site
+remains, so it can gate.
+
+### 18.5 Single-browser multi-arm capture is not an optimisation
+
+Folding in Building's result — six captures in 355 s in one browser against
+roughly 1500 s as separate runs — with the mechanism now measured at 216–247 s of
+driver compile per cold browser:
+
+**One browser pays the compile once. N browsers pay it N times.** At ~230 s per
+cold start, the arm count is nearly free and the browser count is nearly all of
+the cost. So `--ab=`-style multi-arm capture in a single browser is **the only
+sane way to capture anything cold**, and any harness that loops "launch, measure,
+close" is paying the dominant cost once per iteration for no return.
+
+The counterpart, from §17.1: because the first arm in a shared browser pays that
+compile and later arms do not, **the first arm must never be read as a condition
+effect.** The same property that makes single-browser capture cheap makes its
+first measurement incomparable.
+
+## Vegetation honours `ctx.quality.transmission`, and the program count does not move — measured, with the reason
+
+Wired at one chokepoint (`VegetationSystem.maybeTransmit`) so the gate cannot be
+honoured at three call sites and missed at a fourth. `high` takes exactly the
+previous path: draws 351 and 4,594,731 triangles at `storedoor`, identical to the
+pre-change baseline.
+
+The result, from `shoot6` which now prints program count and Vegetation's share of
+it on every capture:
+
+| arm | draws | triangles | programs | of which foliage-transmission |
+| --- | --- | --- | --- | --- |
+| default (`high`) | 351 | 4,594,731 | 143 | **6** |
+| `?tier=low` | 351 | 2,836,145 | 143 | **0** |
+
+The flag works. `__VEGETATION` echoes `transmission:false`, and all six of the
+programs carrying the `foliage-transmission` cache key are gone. **And the total
+is unchanged, because those six were replaced one-for-one by six stock-key
+programs.**
+
+That is not a bug in the flag, it is a property of what `onBeforeCompile` costs.
+Vegetation has six materials whose *define sets* are unique in this scene —
+combinations of `map`, `alphaTest`, `vertexColors`, `DoubleSide`, `shadowSide` and
+`dithering` that nothing else uses. Three keys the program cache on the define
+set, so each of those six costs a program whether or not a shader is injected
+into it. The transmission hook never added programs. It made six existing
+programs **bigger**.
+
+### The consequence for the tier pass criterion, which matters beyond this system
+
+**Program count cannot see the change every owner was just asked to make.** The
+request going out to owners is to gate `onBeforeCompile` sites and material
+variants. Gating an `onBeforeCompile` site reduces program *size*; it only reduces
+program *count* in the special case where the material's defines then collide with
+another material's. So a round of these changes could cut cold compile time
+substantially with the count pinned at 143, and a harness whose headline criterion
+is count would report no progress — while a change that merged two materials and
+saved nothing but a link would report a win.
+
+Both numbers are real, they are not the same number, and the one the user feels is
+the 216 s. Suggest adding either per-program link time or time-to-first-frame from
+a cold profile, and keeping count as a secondary. This is the same shape as the
+`?` column: a criterion that cannot move is as blind as one that was never read.
+
+### What would move Vegetation's count, and what it costs
+
+Six material variants, so six programs. Collapsing them at `low` — one shared
+foliage material across kinds and variants, uniform `alphaTest` and `side` — could
+plausibly take 6 to 2 or 3. That is a real change to the material layer with a
+visible cost (per-kind `alphaTest` and `shadowSide` were both tuned against
+specific defects), not a one-liner, and it is not being taken under convergence.
+Naming it so whoever needs the count knows where it is.
+
+### What a low-tier machine loses visually
+
+Already measured, in `HANDOVER-vegetation.md`: crown warmth. Sign of R-B on lit
+crowns goes from +1.4 with transmission to **-1.7** without, and crown luma from
+79.9 to 79.0. Cool-lit crowns were the original defect, so `low` reverts to it —
+which is the right trade at `low` and must not reach `high`. It does not: `high`
+is byte-identical.
+
+### On honouring `scatterDensity` at generation time — declining, and why it is not about effort
+
+One multiply in one call site, so effort is not the objection. **The two
+mechanisms compose multiplicatively and I cannot fix the other half.**
+`Game.captureScatterBaseline` traverses the scene after `init()` and records
+`authored = mesh.count` for every `InstancedMesh` with 64 or more instances, which
+is all of mine, and `applyScatterDensity` then sets `count = authored * d`. If I
+generate at `d` as well, `authored` is already reduced and the factor lands twice:
+at `low` that is 0.25 x 0.25 = **6% of instances**, the far scrub gone entirely,
+and it would present as a Vegetation defect.
+
+Making it safe needs a change in `src/core/Game.ts`, which is not mine to edit. Two
+shapes that would work, in the order I would prefer them:
+
+1. **A separate field.** `scatterDensity` stays the post-hoc runtime lever;
+   generation-time honouring reads something like `scatterBudget`, applied once at
+   init and *excluded* from the baseline factor. Two mechanisms, two names, no
+   composition.
+2. **An opt-out.** A marker on meshes that already honoured the tier, skipped by
+   `captureScatterBaseline`. Cheaper, but every owner has to remember it.
+
+Say the word and the Vegetation side of (1) is one line.
+
+### A separate defect in the post-hoc lever, worth more than the above
+
+`mesh.count = authored * d` truncates, so it keeps instances `0..n-1`. **That is
+only equivalent to thinning uniformly if instance order is spatially uncorrelated,
+and in a scatter built group by group it is maximally correlated.** Mine are:
+within each far mesh the fill order is the generation order, which is annulus
+(58 clusters), then gap ring (16), then road corridor (34) — contiguous blocks. So
+`d = 0.25` does not thin the far scrub by 75%, it **deletes the gap ring and the
+road corridor outright** and keeps the annulus whole. Those are precisely the two
+layers added this round to close a fringe defect a critic had already reported.
+`scatterSprigs` is worse: grid-scan order, so truncation removes a contiguous
+band of z rather than a scatter.
+
+The one-place fix belongs in the lever, not in six owners' fill orders: **shuffle
+each mesh's instance buffer once, at baseline capture**, with a fixed seed. After
+that, truncation is a uniform random sample for every system at once, including
+ones not yet written. Doing it per-owner means every current owner edits their fill
+order and every future one reintroduces the bug.
+
+## 19. Ruling: collapse the `worldDetail` program cache key at every tier
+
+Terrain measured the lever and declined to take it, because "no-op at high" was a
+hard requirement in its brief. **I own the tier criterion, so this is my call:
+take it.** The reasoning and the conditions follow, because the conditions are
+where the actual risk lives.
+
+### 19.1 Why the no-op requirement does not bite here
+
+The requirement exists to protect the picture. What it forbids is a *visible*
+change at high tier. Terrain's measurement establishes that the collapse changes
+**which compiled program object five materials point at**, and that the source
+those materials emit is byte-identical. Identical source compiled by the same
+driver produces identical instructions; uniforms are uploaded per material
+regardless of program sharing. **The picture cannot move**, so the requirement is
+satisfied in substance even though a number moves.
+
+Reading it as "no measurable change of any kind at high" would forbid every
+saving that is not also a regression, which cannot be what it is for.
+
+Against that: cold load is the top deliverable risk, compilation is ~92% of a
+~284 s first load, and this is 6 of 193 programs for zero picture cost. There is
+no version of the trade where refusing is correct.
+
+### 19.2 The two conditions, and why they are not ceremony
+
+The safety of the collapse rests **entirely** on the byte-identity claim. If that
+claim ever stops holding, three hands the second material the first's compiled
+program, silently, with no link error — the ground rendering with another
+surface's arms, and nothing downstream able to attribute it. So the claim has to
+be enforced continuously, not measured once.
+
+`tools/shaderlint.mjs` does enforce it, exits non-zero, and carries a self-test.
+Two gaps, both of which fall in the arm the change newly depends on:
+
+**Condition 1 — assert identity in the DEFAULT configuration, not only reduced.**
+The identity test calls `applyWorldDetail(m, { ...opts, reduced: true })`. Today
+that is exactly right, because today the collapsed key is only used when
+`reduced` is set. Collapsing at every tier inverts that: the **non-reduced** path
+becomes the one relying on byte-identity, and it is the path with no assertion on
+it. The gate would then protect the arm that no longer needs protecting and leave
+the shipping arm bare.
+
+**Condition 2 — make the `antiTile` finding fail, and fix its polarity.** The
+linter carries this comment:
+
+> `useAnti` ... **Asserted rather than described**, because if someone later makes
+> the arm conditional this becomes the load-bearing distinction and the note below
+> turns into a lie.
+
+The comment identifies the hazard precisely. The code beneath it never touches
+its `fail` counter — it prints. And its polarity is backwards for the change being
+made:
+
+| `antiTile` changes source? | today (key has `useAnti`) | after collapse | linter prints |
+|---|---|---|---|
+| no | safe | **safe** | `note` |
+| yes | safe — key distinguishes | **UNSAFE** | `ok` |
+
+So the one state that becomes dangerous is the one it labels `ok`. Once `useAnti`
+leaves the key, `antiOn !== antiOff` must be **fatal**. As written, a future edit
+making the anti-tile arm conditional would ship a wrong-shader bug with a green
+harness — which is the same shape as the comment's own prediction, one level down.
+
+Both conditions are in Terrain's files. **The edit is Terrain's; the decision is
+mine.** Neither is more than a few lines, and the second is worth having whether
+or not the collapse lands.
+
+### 19.3 Sweep: four more sites key on configuration, not on source
+
+The generalisable half. A cache key should answer *would these compile different
+GLSL*, and four sites answer *are these differently configured*:
+
+| site | key | keyed on |
+|---|---|---|
+| `worldDetail.ts:1485` | `wd:${opts.key}:${flagBits}` | material **name** + flags |
+| `buildingWeather.ts:419` | `bw:${opts.key}:${flagBits}` | config id + flags |
+| `buildingCoursing.ts:433` | `bc:${opts.key}` | config id |
+| `buildingGlazing.ts:105` | `bgfres:${opts.key}` | config id |
+| `hardsurface.ts:398` | `grime:${o.key}` | config id |
+| `carGrime.ts:259` | `car-weather` | constant — correct |
+| `vegTransmission.ts:250` | `foliage-transmission-v2` | constant — correct (fixed earlier) |
+
+Configuration identity is a superset of source identity, so every one of these is
+**safe** and some are wasteful. The flag-bit suffixes are likely legitimate, since
+each flag plausibly gates an injected block; it is the opaque `opts.key`
+component that is suspect, because if the flags already capture every emission
+decision then the config id adds nothing but links.
+
+I am not claiming a magnitude for the four non-Terrain sites. Establishing one
+needs a per-module byte-identity test in the shape `shaderlint.mjs` already has,
+and those are four other owners' files. What I can say is that the defect class is
+confirmed present in the one site that was measured, and the test that would
+settle each of the others already exists as a pattern in this repo.
+
+**Free measurement available:** grouping `renderer.info.programs` by cache-key
+prefix costs one `evaluate` and would give per-owner program counts
+(`wd:` / `bw:` / `bc:` / `bgfres:` / `grime:`) directly. Folding it into the
+frametime window at zero extra cost.
+
+### 19.4 Instrument cautions accepted
+
+Terrain's two cautions are correct and both bind my remaining work.
+
+**Time-to-N-frames is not comparable across arms in one browser process.** All
+arms share one driver program cache, so the arm that runs last reads fastest and
+the ordering *is* the result. This is the same confound I hit measuring cold load
+per tier — 234.9 s when `high` ran first, 268.7 s when `low` did. My `tiers.mjs`
+already carries the note; the `--cold` mode with a fresh profile per tier is the
+only way to compare compile cost per arm, and it costs ~15 min.
+
+**A byte comparison across bundles cannot prove a no-op on a tree five agents are
+editing.** Terrain's high-tier diff showed 15,129 darkened pixels that were not
+Terrain's. Consequence for my frametime run: **I will pin the bundle, record its
+commit, and state that every number in the run describes that bundle only.** A
+run whose build straddles two sibling landings measures neither.
+
+---
+
+## URGENT, from Terrain, before you pin: an unverified change of mine is in the default path
+
+**Read this before pinning the frametime bundle.** It is good news for your
+numbers and that is exactly why it must not be a surprise in them.
+
+I landed a gravel-scatter change in `TerrainSystem.scatterDebris` on the default
+path while diagnosing Film's spawn-frame verge complaint. It is **CPU-verified
+only — no pixels.** My capture slot is fourth, behind you, so if you pin now your
+bundle contains it unconfirmed.
+
+### What moved
+
+| quantity | before | after | note |
+|---|---|---|---|
+| stone instance cap | 24000 | **12000** | `IcosahedronGeometry(1, 0)` is 20 tris, so **~240000 triangles returned** |
+| stone radius | 14-76 mm | 24-122 mm | median 29.5 -> 54.2 mm, so 3.38x area each; 1.69x ground coverage at half the count |
+| per-instance colour | none | `setColorAt` | one `instanceColor` buffer, 12000 x 3 floats = **144 KB**, no extra draw call |
+| draw calls | unchanged | unchanged | still one `InstancedMesh` |
+
+**Read the live figure, do not use mine.** The cap is 12000 but the acceptance
+loop may place fewer, and the placed count is reported by
+`__TERRAIN.debrisCounts.gravel` with the triangle total in `__TERRAIN.triangles`.
+The 240000 above is the cap difference, not a measurement.
+
+### You do not have to wait for me to get a clean number
+
+Both halves have forced-off arms, so you can measure either side without my slot:
+
+- **`?tforce=finegravel`** restores 14-76 mm at **24000** — the pre-change
+  triangle load. Use this if you want your frametime run to describe the
+  configuration your earlier numbers describe.
+- **`?tforce=flatgravel`** restores the shared stone tone only, leaving size and
+  count at the new values. Irrelevant to frametime; listed so the token is not a
+  mystery if you see it.
+- `?tforce=thindebris` is unchanged and still pinned at 9000, so your existing
+  triangle-cost comparison still means what it meant.
+
+My recommendation, since the ruling is yours: **pin the default and state that
+the triangle count includes an unverified Terrain gravel change**, with
+`finegravel` named as the arm that undoes it. That way the run describes the tree
+as it actually is, and the one change in it that has not seen pixels is on the
+record rather than folded into a total. If you would rather your last scheduled
+measurement contain nothing unverified, run `finegravel` and I will re-measure
+the delta myself after my slot.
+
+### The other half of the same trade: the near-field dirt map is magnified 2.0x
+
+Raising this here because **the triangle refund above is what would pay for it**,
+and you should see both numbers in one place.
+
+The dirt map is `makeDirt(1024, 17, ...)` — 1024 texels over a 17 m tile, so
+**16.6 mm per texel**. At the archived spawn pose (level camera, eye 1.650 m above
+ground, vfov 52) the bottom frame row is ground at 3.30 m where one screen pixel
+spans **8.3 mm**:
+
+| screen row | ground distance | mm per px | texels per px | regime |
+|---|---|---|---|---|
+| 900 (bottom) | 3.30 m | 8.3 | 0.50 | **magnified 2.0x** |
+| 850 | 3.76 m | 10.3 | 0.62 | magnified 1.6x |
+| 800 | 4.35 m | 13.3 | 0.80 | magnified 1.3x |
+| 750 | 5.11 m | 17.7 | 1.07 | about 1:1 |
+| 660 | 7.33 m | 34.6 | 2.09 | minified, mip territory |
+
+So the immediate foreground — the region Film called the worst thing in the spawn
+frame — is a **magnified blur**, and no further spectrum or amplitude work on that
+map can read there. This is the mechanism behind the "near-field carpet" I chased
+twice from the wrong end.
+
+**It is your call to price, not mine to take.** The options and what each
+protects:
+
+- A bounded near-field detail layer, tiled much smaller and faded out past ~8 m.
+  Costs one more sampler and one more map; buys the only band that matters at
+  spawn. My preference, and the triangle refund covers it.
+- Doubling the dirt map to 2048 over the same 17 m tile. 8.3 mm per texel, so
+  1:1 at the bottom row — but it is 4x the memory of the map it replaces, on a
+  surface that is mip territory over most of its area. Bad trade.
+- Nothing, and accept a blurred immediate foreground.
+
+**Unchanged from my earlier answers**, restated so this message is self-contained:
+halving the site overlay is worth about **17 MB** and I agree with it at 45 mm per
+texel; halving the asphalt set is still **no**, because 3.9 mm per texel against a
+7 mm aggregate feature is 1.8 texels and halving deletes the foreground grain the
+critic explicitly protected.
+
+### Terrain: the near-field detail layer, priced and DEFERRED — inherit the analysis, not the question
+
+Not taken. It is a new memory cost proposed after the last scheduled measurement,
+on a project whose top risk is a ~284 s first load and whose crash history is VRAM
+exhaustion. Left here so whoever picks it up inherits the reasoning.
+
+**The defect being priced.** `makeDirt(1024, 17, ...)` is 16.6 mm per texel. At
+the archived spawn pose — level camera, eye 1.650 m above ground, fov 52 — the
+bottom frame row is ground at 3.30 m where one screen pixel spans 8.3 mm, so the
+map is **magnified 2.0x** there, 1.6x at row 850, and crosses to minified only
+above row 700. The immediate foreground is a magnified blur, and no further
+spectrum or amplitude work on that map can read there. This is the mechanism
+behind the "near-field carpet" chased twice from the wrong end.
+
+| option | cost | what it buys | verdict |
+|---|---|---|---|
+| bounded detail layer, small tile, faded out past ~8 m | one sampler + one small map | the only band that matters at spawn | **recommended when there is headroom** |
+| dirt map 1024 -> 2048 over the same 17 m tile | **4x the memory of the map it replaces** | 8.3 mm/texel, 1:1 at the bottom row | no — pays everywhere for a gain in one band, on a surface that is mip territory over most of its area |
+| nothing | zero | — | acceptable; the verge's dominant defect was tone, not sharpness |
+
+**CORRECTED, and the correction promotes this item.** The third row above said
+"acceptable; the verge's dominant defect was tone, not sharpness". That is now
+known to be wrong, and the first row is not a nice-to-have.
+
+**This is the fix for Film's spawn-frame complaint — the only visual note anyone
+made about the opening frame of the project.** Film reported "the gravel verge in
+the immediate foreground is the largest and least attractive thing in the spawn
+frame, high-frequency and visibly repetitive, and it dominates the bottom third".
+Two rounds went into the gravel scatter on the strength of that sentence. Neither
+could work, because **that band is not gravel and not dirt: it is the paved
+driveway apron.** `pavedDistance` returns 0.00 m at 45 of 45 samples across it,
+100% inside the scatter's 0.12 m paved exclusion; the band unprojects to z
+5.55-7.5 and `drivewayY` interpolates from `ROAD.halfPaved` 5.16 to `PAD.minZ`
+8.4. Its rendered p50 of 29 matches forecourt asphalt at 28, not dirt.
+
+So no scatter change can ever populate it, and none should — loose gravel on a
+driveway is a defect, and the exclusion that blocked both attempts is correct.
+What is left is exactly the defect this section prices: **asphalt magnified 2.0x
+with no relief, filling the bottom third of the first frame anyone records.**
+
+Whoever takes the bounded detail layer should know it is not a polish item. It is
+the answer to the opening frame, and it is the last open visual note on the
+project. Take it with measurement time available to confirm it.
+
+## 20. The quiet-host run: void, with excellent numbers, and three defects in my own protocol
+
+The exclusive window ran. `stress.mjs --minutes=20 --park=120 --baseline=30000`,
+warm profile, no sibling harness on the card. **20 minutes, 151,744 frames,
+zero system errors, no context loss, every memory counter flat.**
+
+And **the run is VOID under my own protocol — 4 of 5 conditions fired.**
+
+The frame numbers are the best this project has produced: steady-state mean
+7.32 ms (136.7 fps), median 5.4 ms, p95 14.4 ms, and **3 frames over 100 ms in
+140,077.** That combination — a flattering result from a void run — is the single
+most dangerous artefact this project can produce, so the numbers are recorded
+below as *indicative* and **not one of them is the definitive answer.** The
+definitive answer needs a re-run after the defects below are fixed.
+
+### 20.1 The four conditions, and what each actually means
+
+| # | condition | fired because | verdict |
+|---|---|---|---|
+| 1 | baseline drift 508 MiB (limit 100) | something on the host moved half a gigabyte of VRAM before launch | **genuine** |
+| 2 | GPU 99% busy while parked (limit 50) | our own uncapped renderer saturates the card by design | **defect** |
+| 3 | init min 2249 MiB below baseline mean 2553 | downstream of (1) | **genuine, redundant** |
+| 4 | parked mean 18.73 ms above walking median 5.4 ms | the parked control runs inside the warm-up window | **defect** |
+
+Condition 1 is real and is the honest reason the run does not count: **the host was
+not quiet.** The card drifted 2419–2927 MiB during the 30-second baseline with no
+harness running. The user's browser holds 11–14 processes and is the likely mover.
+A 508 MiB baseline drift swamps any VRAM attribution, which is exactly what the
+condition is for, and condition 3 is the same fact restated.
+
+### 20.2 Condition 2 cannot pass, and never could
+
+`>50% GPU utilisation with the camera static` was written to detect *another
+process* competing for the card. It measures total card utilisation, and this
+renderer has no frame cap — so it renders as fast as the GPU allows and the GPU is
+therefore ~100% busy whenever the scene is up, parked or not. **The condition
+fires on a perfectly quiet host and always will.**
+
+Worse, the thing it wants cannot be measured here at all: `nvidia-smi` does not
+attribute utilisation per process on WDDM. So the correct verdict for this
+condition is **UNKNOWN, not VOID** — the same defect class as a criterion that
+prints `?` and passes, arriving in the gate rather than in the harness.
+
+**I have not changed it.** Relaxing a gate immediately after it failed my own run
+is precisely the move I have criticised others for, and the fix changes whether my
+run passes. It needs to be a decision, not a self-serving edit.
+
+### 20.3 Condition 4 is the important one: the parked control measures warm-up
+
+This explains an inversion recorded earlier tonight as unexplained — an identical
+static frame costing more than a moving camera.
+
+**The parked control runs from 5 s to 121 s.** The walk's steady-state filter
+discards everything before 60 s as unrepresentative. So the control sits almost
+entirely inside the window the analysis itself excludes, and it is being compared
+against a filtered walk. Direct evidence it was still settling: texture bytes fell
+737.64 → 726.88 MB at t=51 s, mid-control.
+
+Confirmed by phase ranking — the parked mean is more expensive than **every**
+walking phase, including the cooler poses that dominate the route:
+
+```
+parked control     18.73 ms      <- first 2 minutes
+cooler-shut-look   14.28 ms
+store-enter        14.24 ms
+cooler-open-look   14.22 ms
+store-interior     10.68 ms
+forecourt-approach  7.32 ms      <- same camera region as parked, 2.5x cheaper
+```
+
+A parked camera on the forecourt costs 18.73 ms while *walking* the same forecourt
+costs 7.32 ms. The pose is not the difference; the **time** is.
+
+**The fix is to the experiment, not the gate: the parked control must run after the
+walk, not before it.** A control that shares the warm-up window with nothing else
+is not a control. This is an ordering change with no bearing on whether my run
+passes, so I am recording it as required and leaving the threshold alone.
+
+### 20.4 What survives the void
+
+These do not depend on the failed conditions, and each is either an absolute
+statement or robust in direction:
+
+- **Stability: 20 minutes, 151,744 frames, 0 system errors, `contextLost: null`,
+  `survived: true`.** Texture bytes flat at 724.14 MB, programs flat at 189, draw
+  calls flat, heap oscillating 357–433 MB with no trend. The `WEBGL CONTEXT LOST`
+  line in the console arrived at teardown, after the final sample — benign.
+- **The 100 ms clamp cost, as an upper bound.** 3 clamped frames in 20 minutes
+  (115, 149, 161 ms), 125.7 ms of simulation discarded, which is **17.6 cm not
+  covered walking and 29.9 cm sprinting.** Contention can only make this worse, so
+  a quiet host cannot be hiding a larger number.
+- **Frames over 100 ms: 3 of 140,077 steady frames**, all in `store-interior`.
+- **Warm versus cold on the same profile directory: 19.7 s against 216.5 s.** Two
+  runs, same machine, same `tmp/profiles/stress`, differing only in whether the
+  directory had been used. An 11x effect, independently confirming that shader-cache
+  warmth belongs to the profile.
+- **Relative phase cost**, which is a ratio and therefore contention-robust: the
+  cooler and store-entry poses are ~2x the forecourt.
+
+### 20.5 The clamp instrument published 278 metres before it published 17.6 cm
+
+Worth recording because the first version of my own metric was wrong in a way
+that only its absurdity caught. It summed every delta over the clamp, and deltas
+of **148 seconds** exist — not slow frames, but the frame loop not being driven at
+all while the harness blocked the main thread building the walkable grid. Five such
+gaps summed to 198,992 ms and were priced as **278 metres of lost ground.**
+
+Two lessons. Deltas above ~1 s are a different phenomenon from slow frames and
+must be counted separately, never priced; the corrected run reports `stalls: 0`
+after resetting the counters at walk start. And **reporting a derived physical
+quantity is what made the bug visible**: nobody would have looked twice at
+198,992 ms, but 278 metres in a 60-metre forecourt is impossible on its face. A
+metric expressed in units the reader has intuitions about audits itself.
+
+### Terrain, correcting my own triangle figure by 4x
+
+I told you the gravel change returns **~240000 triangles**. Measured at the spawn
+pose on bundle `efe7a98fc103`, `renderer.info.render.triangles` reads **6931985
+default against 7891985 with `?tforce=finegravel`** — a **960000** per-frame
+difference, four times what I reported.
+
+The reason is that the figure I gave was unique geometry: 12000 fewer stones at 20
+triangles each. But `stones.castShadow = true` and the sun runs three shadow
+cascades, so every stone is drawn four times per frame. **A triangle refund on a
+shadow-casting object is multiplied by the number of passes it appears in**, and
+quoting the mesh's own triangle count understates it by exactly that factor.
+
+Also measured, since it is the read you authorised: **185 programs total, 12 of
+them `wd`, over 5 distinct `wd` keys**, with no material name in any key and nine
+flag bits rather than ten. That corroborates your 193 -> 189 from a different
+scene state and confirms the collapse is live rather than merely compiled.
+**173 of the 185 are unattributable** because their owners set no
+`customProgramCacheKey` — reported as a gap rather than bucketed, since an
+attribution with an invented denominator is worse than an admitted hole.

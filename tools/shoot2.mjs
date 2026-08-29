@@ -43,7 +43,18 @@ const PORT = 5112;
 const OUT_DIR = path.join(".shot-build", "system2");
 const WIDTH = 1600;
 const HEIGHT = 900;
-const READY_TIMEOUT_MS = 120_000;
+/**
+ * 420 s, not 120 s, and the reason is measured rather than defensive.
+ *
+ * A fresh Chrome profile loads this scene in ~279–284 s against ~21–25 s warm,
+ * and ~262 s of that is the **driver compiling shaders** — a cost that lands on
+ * every run of this harness, because new-headless launches a clean profile and
+ * therefore an empty shader cache every time. At 120 s the wait was shorter than
+ * the load, so a perfectly healthy build reported "never became ready" with an
+ * empty page console, which reads exactly like a shader link failure. It cost a
+ * capture cycle to tell those apart.
+ */
+const READY_TIMEOUT_MS = 420_000;
 
 const argv = process.argv.slice(2);
 const arg = (name, fallback) => {
@@ -56,8 +67,53 @@ const SUFFIX = arg("suffix", "");
 const ONLY = arg("shots", "").split(",").filter(Boolean);
 const DO_BUILD = !argv.includes("--no-build");
 
-const ALL_SHOTS = ["front", "door", "interior", "cooler", "corner", "wall", "base", "bottle"];
+/**
+ * A second copy of the names in `src/gen/buildingShots.ts`, which is a liability
+ * this file cannot fully remove: importing that module here would pull the whole
+ * Vite-resolved `src/` graph into Node.
+ *
+ * What it *can* remove is the silent half. `--shots=grab,cooler` used to filter
+ * this array and quietly return one name, so a pose that exists in the source
+ * and not in this list produced a round that looked complete and was missing the
+ * only capture the run was for. Unknown names are now fatal.
+ */
+const ALL_SHOTS = ["front", "door", "interior", "cooler", "grab", "corner", "wall", "base", "bottle"];
+const unknown = ONLY.filter((s) => !ALL_SHOTS.includes(s));
+if (unknown.length) {
+  console.error(
+    `[shoot2] unknown shot name(s): ${unknown.join(", ")}\n` +
+      `         known: ${ALL_SHOTS.join(", ")}\n` +
+      `         If the pose exists in src/gen/buildingShots.ts, add it to ALL_SHOTS here too.`
+  );
+  process.exit(2);
+}
 const SHOTS = ONLY.length ? ALL_SHOTS.filter((s) => ONLY.includes(s)) : ALL_SHOTS;
+
+/**
+ * `--ab=<query>` - both arms of a comparison from one build, one server and one
+ * browser, back to back. Repeatable, so `--ab=bliner=1 --ab=ibounce=0` gives
+ * three arms.
+ *
+ * Ported from `shoot3.mjs`, which derived it after attributing a tile difference
+ * to its own work twice and being wrong twice: in a tree six agents are
+ * committing to, two rounds minutes apart is long enough for the comparison to
+ * be about somebody else's change.
+ *
+ * There is a second reason here, measured tonight. A fresh Chrome profile spends
+ * ~262 s of its ~280 s load having the driver compile shaders, and this harness
+ * launches a clean profile per run. Two arms as two runs is therefore ~500 s of
+ * which ~500 s is compilation; two arms in one browser pays it once, because the
+ * GPU process and its program cache survive between pages.
+ */
+const ABS = process.argv.filter((a) => a.startsWith("--ab=")).map((a) => a.slice(5)).filter(Boolean);
+const JOBS = [];
+for (const shot of SHOTS) {
+  JOBS.push({ shot, query: QUERY, suffix: SUFFIX });
+  ABS.forEach((ab, i) => {
+    const tag = ab.replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "");
+    JOBS.push({ shot, query: [QUERY, ab].filter(Boolean).join("&"), suffix: `${SUFFIX}__${tag || `ab${i}`}` });
+  });
+}
 
 /**
  * Per-pose frame health, checked on every capture before the round is handed to
@@ -308,7 +364,7 @@ async function main() {
     bundleHash,
     bundleMtime: new Date(newest).toISOString(),
     tag: "shoot2",
-    extra: { query: QUERY || null, suffix: SUFFIX || null, shots: SHOTS.slice() },
+    extra: { query: QUERY || null, suffix: SUFFIX || null, shots: SHOTS.slice(), arms: ABS.slice() },
   });
   roundState.round = round;
   // [] means "asked, and every system initialised"; null means "never asked".
@@ -318,7 +374,7 @@ async function main() {
 
   const written = [];
   const fatal = [];
-  for (const shot of SHOTS) {
+  for (const { shot, query: jobQuery, suffix: jobSuffix } of JOBS) {
     const page = await context.newPage();
     const problems = [];
     page.on("console", (m) => {
@@ -326,11 +382,19 @@ async function main() {
     });
     page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
 
-    const url = `${base}?shot=${encodeURIComponent(shot)}${QUERY ? `&${QUERY}` : ""}`;
+    const url = `${base}?shot=${encodeURIComponent(shot)}${jobQuery ? `&${jobQuery}` : ""}`;
     const t0 = Date.now();
     await page.goto(url, { waitUntil: "load", timeout: 60_000 });
     try {
-      await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: READY_TIMEOUT_MS });
+      // `polling: 500` rather than the default, which is rAF. A backgrounded or
+      // GPU-starved tab has its rAF throttled hard, so the default can time out
+      // waiting for a condition the page satisfied minutes earlier - NOTES.md
+      // case 54. Four agents are sharing this GPU tonight, which is exactly the
+      // condition that produces it.
+      await page.waitForFunction(() => window.__SCENE_READY === true, null, {
+        timeout: READY_TIMEOUT_MS,
+        polling: 500,
+      });
     } catch (err) {
       // A scene that never signals ready is nearly always a shader that failed
       // to link or an exception during init, and the message is sitting in the
@@ -441,7 +505,7 @@ async function main() {
     // Archive path, with a copy at shots/<system>/<shot>.png. Log the archive
     // one: per NOTES.md case 13, that is the copy still readable next week and
     // the only one stamped with the bundle that produced it.
-    const file = await round.save(`${shot}${SUFFIX}`, (dest) => page.screenshot({ path: dest, type: "png" }));
+    const file = await round.save(`${shot}${jobSuffix}`, (dest) => page.screenshot({ path: dest, type: "png" }));
     written.push(file);
     const health = await frameHealth(file, shot);
     console.log(
@@ -482,8 +546,8 @@ async function main() {
 
   await context.close();
 
-  console.log(`\n[shoot2] ${written.length}/${SHOTS.length} screenshots -> ${path.join("shots", SYSTEM)}`);
-  const missing = SHOTS.filter((s) => !written.some((w) => w.endsWith(`${s}${SUFFIX}.png`)));
+  console.log(`\n[shoot2] ${written.length}/${JOBS.length} screenshots -> ${path.join("shots", SYSTEM)}`);
+  const missing = JOBS.filter((j) => !written.some((w) => w.endsWith(`${j.shot}${j.suffix}.png`))).map((j) => `${j.shot}${j.suffix}`);
   const bad = [...new Set([...missing.map((m) => `missing: ${m}`), ...fatal])];
 
   // A status file as well as the exit code. Every capture in this project gets

@@ -33,7 +33,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import net from "node:net";
 import { execFile } from "node:child_process";
-import { assertHardwareGpu, assertSceneGpu, launchOptions, isSoftwareRenderer } from "./gpu.mjs";
+import { assertHardwareGpu, assertSceneGpu, launchWarmProfile, isSoftwareRenderer } from "./gpu.mjs";
 import { assertPrivateBuildDir } from "./scratch.mjs";
 import { evaluateVoidConditions, formatVerdict } from "./voidcheck.mjs";
 
@@ -527,7 +527,20 @@ async function run() {
   }
 
   vram.setPhase("browser-launch");
-  resources.browser = await chromium.launch(launchOptions());
+  // A persistent, reused profile. `chromium.launch()` throws its profile away,
+  // and the driver's shader cache lives in the profile — so an ephemeral launch
+  // pays the full 192-349 s cold compile on every run, however many times this
+  // host has compiled these shaders before. That is a quarter of a
+  // thirty-minute quiet block spent on setup budgeted at twenty seconds.
+  //
+  // Load time is not the measurement here (frametime is), so warming it is free
+  // of any interpretive cost. Harnesses that *do* measure load must not use this.
+  resources.context = await launchWarmProfile({
+    tag: "stress",
+    viewport: { width: WIDTH, height: HEIGHT },
+    deviceScaleFactor: 1,
+  });
+  resources.browser = resources.context.browser();
   out.browserDeath = null;
   resources.browser.on("disconnected", () => {
     if (!out.finishedCleanly) {
@@ -536,7 +549,14 @@ async function run() {
     }
   });
 
-  const context = await resources.browser.newContext({ viewport: { width: WIDTH, height: HEIGHT }, deviceScaleFactor: 1 });
+  // The persistent context itself, not a fresh one: a new context inside the
+  // same process would still be warm, but reusing this one keeps the profile
+  // the single source of warmth rather than relying on intra-process inheritance.
+  const context = resources.context;
+
+  // launchPersistentContext opens with one about:blank page. Close it so the
+  // run holds only pages it created.
+  for (const p of context.pages()) await p.close().catch(() => {});
 
   const gpuPage = await context.newPage();
   await gpuPage.goto(base, { waitUntil: "domcontentloaded", timeout: 60_000 });
@@ -571,7 +591,7 @@ async function run() {
   console.log(`[stress] loading ${base}`);
   const tLoad = Date.now();
   await page.goto(base, { waitUntil: "load", timeout: 60_000 });
-  await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: READY_TIMEOUT_MS });
+  await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 420_000, polling: 500 });
   out.readyMs = Date.now() - tLoad;
   await assertSceneGpu(page, { tag: "stress", when: "after ready" });
   console.log(`[stress] ready in ${(out.readyMs / 1000).toFixed(1)}s`);
@@ -719,6 +739,13 @@ async function run() {
   out.routeSteps = route.length;
 
   console.log(`\n[stress] === walking the real interactive path for ${MINUTES} min ===`);
+
+  // Zero the clamp counters here. Everything before this point — init, the
+  // walkable-grid build, the reachability sweeps — blocks the main thread for
+  // tens of seconds at a time, and those gaps are not slow frames. Including
+  // them made the first version of this metric report 278 m of lost ground off a
+  // "worst frame" of 148 s.
+  await page.evaluate(() => window.__CLAMP?.reset?.());
   console.log(`[stress] route: ${route.length} steps, up to ${LAPS} laps, each lap = 2 fuel sessions, 1 door, 1 cooler, 5 threshold crossings\n`);
 
   const listenersAtStart = await page.evaluate(() => JSON.parse(JSON.stringify(window.__GLSTAT.listeners.byKey)));
@@ -809,13 +836,30 @@ async function run() {
       const final = await page.evaluate(() => {
         const d = window.__STRESS.drain();
         window.__STRESS.stop();
-        return { stats: window.__STRESS.stats(), samples: d.samples, log: d.log, lost: window.__CONTEXT_LOST ?? null, errors: window.__SYSTEM_ERRORS ?? [] };
+        return {
+          stats: window.__STRESS.stats(),
+          samples: d.samples,
+          log: d.log,
+          lost: window.__CONTEXT_LOST ?? null,
+          errors: window.__SYSTEM_ERRORS ?? [],
+          // Simulation time discarded by the 100 ms `dt` clamp in `Game.frame`.
+          // A gameplay quantity, not a cosmetic one: the body covers less ground
+          // than wall clock by `v` times the excess, so the same stall costs a
+          // sprinting player ~1.7x what it costs a walking one.
+          clamp: window.__CLAMP ?? null,
+          // Interaction's own attribution, used rather than rebuilt: the gap
+          // between `travelled` and `speed * simTime` is what collision and
+          // integration took, so a shortfall says which of the three took it.
+          player: window.__PLAYER?.() ?? null,
+        };
       });
       allSamples.push(...final.samples);
       allLog.push(...final.log);
       out.atEnd = final.stats;
       out.contextLost = final.lost;
       out.systemErrors = final.errors;
+      out.clamp = final.clamp;
+      out.player = final.player;
       out.listenerDelta = await page.evaluate((start) => {
         const end = window.__GLSTAT.listeners;
         return Object.entries(end.byKey)
@@ -976,6 +1020,76 @@ function print(o) {
     line(
       `  NOTE: ${o.parked.over100} frames over 100 ms with the camera parked and nothing in the route running. ` +
         `Those are not the scene.`
+    );
+    line();
+  }
+
+  /*
+   * The 100 ms clamp, reported as what it costs the player rather than as a
+   * frame statistic.
+   *
+   * `Game.frame` clamps `dt` at 100 ms because unclamped, a 300 ms frame moves
+   * the body 0.71 m against a 0.32 m collision radius — through a wall. The
+   * clamp is correct and stays. The consequence is that every frame past the
+   * threshold advances the simulation less than wall clock, and the body covers
+   * `v * excess` less ground.
+   *
+   * Reported for both gaits because the loss scales with speed: the same stall
+   * costs a sprinting player RUN_MULTIPLIER times what it costs a walking one,
+   * which is why a sprint shortfall can appear without the controller being
+   * wrong. A mean frame time can look excellent while this happens repeatedly.
+   */
+  const WALK_MS = 1.4; // m/s, from PlayerSystem
+  const RUN_MULT = 1.7;
+  const c = o.clamp;
+  if (c) {
+    line("--- the 100 ms dt clamp: frames that took ground away from the player ---");
+    if (c.frames === 0) {
+      line(`  clamped frames        0 of ${c.framesRendered}  — no frame exceeded the clamp, so no motion was lost`);
+    } else {
+      const lostS = c.lostSimMs / 1000;
+      line(
+        `  clamped frames        ${c.frames} of ${c.framesRendered}` +
+          `  (${((100 * c.frames) / Math.max(1, c.framesRendered)).toFixed(3)}%)`
+      );
+      line(`  simulation time lost  ${c.lostSimMs.toFixed(1)} ms across the walk`);
+      line(`  worst raw frame       ${c.worstRawMs.toFixed(1)} ms  (${(c.worstRawMs - 100).toFixed(1)} ms past the clamp)`);
+      if (c.magnitudesMs?.length) {
+        const sorted = c.magnitudesMs.slice().sort((a, b) => b - a);
+        line(`  clamped frame sizes   ${sorted.slice(0, 8).map((m) => m.toFixed(0) + "ms").join(", ")}${sorted.length > 8 ? ", ..." : ""}`);
+      }
+      line(
+        `  ground not covered    walking ${(WALK_MS * lostS * 100).toFixed(1)} cm` +
+          `,  sprinting ${(WALK_MS * RUN_MULT * lostS * 100).toFixed(1)} cm` +
+          `   (${RUN_MULT}x the same stall)`
+      );
+    }
+    if (c.stalls) {
+      line(
+        `  loop stalls           ${c.stalls} delta(s) over 1 s, worst ${(c.worstStallMs / 1000).toFixed(1)} s ` +
+          `— NOT priced as lost ground: the loop was not being driven (harness evaluate, or a background tab)`
+      );
+    }
+    line();
+  } else {
+    line("--- the 100 ms dt clamp ---");
+    line("  UNKNOWN: window.__CLAMP was not present. Not inferring anything from its absence.");
+    line();
+  }
+
+  // Interaction's attribution, read rather than rebuilt. `travelled` is the
+  // distance the body actually moved post-collision; `speed * simTime` is what
+  // integration intended. The gap is what collision and the clamp took.
+  const pl = o.player;
+  if (pl && pl.simTime > 0) {
+    line("--- controller attribution (Interaction's instrument) ---");
+    line(
+      `  travelled ${pl.travelled.toFixed(2)} m over ${pl.simTime.toFixed(1)} s simulated` +
+        `,  ${pl.resolves} collision resolves,  ${pl.jumps ?? 0} jumps`
+    );
+    line(
+      `  mean realised speed   ${(pl.travelled / pl.simTime).toFixed(3)} m/s` +
+        `   (walk target ${WALK_MS}, sprint target ${(WALK_MS * RUN_MULT).toFixed(2)})`
     );
     line();
   }

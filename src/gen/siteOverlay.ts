@@ -14,6 +14,20 @@ import {
   ROAD,
 } from "../site";
 
+/**
+ * The part of `GroundAccum` this file consumes.
+ *
+ * Structural typing rather than the full interface, so the overlay states its
+ * two dependencies instead of importing a service with nine members and letting
+ * a reader guess which are load-bearing.
+ */
+export interface AccumSource {
+  /** Where water stands and does not move. Bimodal 0..1, p50 near zero. */
+  grime(x: number, z: number): number;
+  /** Where wind and traffic keep the ground clean. Bimodal 0..1, p50 near zero. */
+  swept(x: number, z: number): number;
+}
+
 export interface SiteOverlay {
   texture: THREE.DataTexture;
   /** World-space min corner (x, z). */
@@ -41,7 +55,7 @@ export interface SiteOverlay {
  * The R/G/B layer and the A layer are painted on two separate canvases because
  * a 2D context uses alpha for compositing, so it cannot also carry data.
  */
-export function makeSiteOverlay(): SiteOverlay {
+export function makeSiteOverlay(accum?: AccumSource): SiteOverlay {
   const { minX, maxX, minZ, maxZ } = OVERLAY_REGION;
   const worldW = maxX - minX;
   const worldH = maxZ - minZ;
@@ -528,6 +542,187 @@ export function makeSiteOverlay(): SiteOverlay {
           ctx.fillStyle = ov(0.36, -0.3, 0.75, 0.25 + rng() * 0.45);
           ctx.beginPath();
           ctx.arc(px(x + (rng() - 0.5) * 2.6), py(z + (rng() - 0.5) * 2.0), m(0.015 + rng() * 0.06), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 5b. tyre scrub at the stances, and the kerb grime band               */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Added after a walking-height capture showed the forecourt reading as
+   * near-uniform mid-grey at frame scale while a 1:1 crop of the same frame
+   * clearly carried stain detail.
+   *
+   * The diagnosis is worth keeping, because the obvious reading was wrong. A
+   * byte-level scan of this map (`tools/overlayscan.mjs`) found the forecourt is
+   * already the *dirtiest* surface on the site — oil-tint channel averaging 33
+   * against the asphalt lot's 11, and 100% coverage at the island stances — so
+   * the forecourt was never undirtied and painting more grime of the same kind
+   * would have changed nothing visible.
+   *
+   * What it lacks is **structure at the scale the eye reads**. Four stances per
+   * island side, each with a 1.0-1.9 m soft halo at 2.6 m spacing, means the
+   * halos overlap and sum to a continuous wash: hence 100% coverage and no
+   * local contrast. A wash of any depth reads as "slightly different concrete".
+   * The fix is features at 1-4 m with hard edges, not more area at low contrast.
+   *
+   * So: tyre scrub. A car on a forecourt does not drive straight through, which
+   * is what the fuelling-lane paths above depict. It swings in off the lane,
+   * stops with its wheels turned, and swings out — and rubber laid down by a
+   * tyre scrubbing sideways under load is the highest-contrast mark on any
+   * forecourt. Curved, short, and dark, which is exactly the missing scale.
+   */
+  const stanceScrub = () => {
+    for (const isl of ISLANDS) {
+      for (const side of [-1, 1]) {
+        const z = isl.cz + side * (ISLAND.width / 2 + 1.35);
+        for (let s = 0; s < 4; s++) {
+          const x = isl.cx - ISLAND.length / 2 + 1.1 + (s / 3) * (ISLAND.length - 2.2);
+          // Which way this driver came from. Both happen; alternating rather
+          // than randomising keeps the marks from clumping on one side.
+          const from = s % 2 === 0 ? -1 : 1;
+
+          // The swing-in: off the through lane, curving to the stance and
+          // stopping. Short, so it reads as an arc and not as a lane.
+          //
+          // Deliberately NOT `drivenPath`. That helper paints a dusty, sun
+          // bleached strip at 1.22x albedo across `gauge + 1.5` m, which is
+          // correct for an open lane where the ground between the wheel tracks
+          // really is paler. Sixteen of them layered over the stances flooded
+          // the area with light wash instead: measured, it *lowered* stance oil
+          // tint from 63 to 50 and raised the 5th-percentile albedo from 88 to
+          // 94, so the first version of this section reduced the very contrast
+          // it was added to create. Two dark ribbons and no centre strip.
+          const swing: [number, number][] = [
+            [x + from * 7.4, isl.cz + side * 0.4],
+            [x + from * 4.2, z - side * 0.55],
+            [x + from * 1.6, z + 0.05],
+            [x - from * 0.9, z],
+          ];
+          for (const wheel of [-1, 1]) {
+            for (const [w, tone, tint, alpha, bl] of [
+              [0.6, 0.86, 0.2, 0.34, 0.2],
+              [0.26, 0.62, 0.42, 0.66, 0.05],
+            ] as const) {
+              blur(ctx, m(bl));
+              ctx.strokeStyle = ov(tone, -0.18, tint, alpha * (0.7 + rng() * 0.4));
+              ctx.lineWidth = m(w);
+              ctx.beginPath();
+              const off = (wheel * 1.72) / 2;
+              // Offset along the local normal, same construction as
+              // `drivenPath`'s `curve`, so the pair stays parallel round the bend.
+              const out = swing.map((p, i) => {
+                const a = swing[Math.max(0, i - 1)];
+                const b = swing[Math.min(swing.length - 1, i + 1)];
+                const dx = b[0] - a[0];
+                const dz = b[1] - a[1];
+                const l = Math.hypot(dx, dz) || 1;
+                return [p[0] - (dz / l) * off, p[1] + (dx / l) * off] as [number, number];
+              });
+              ctx.moveTo(px(out[0][0]), py(out[0][1]));
+              for (let i = 1; i < out.length - 1; i++) {
+                const xc = (out[i][0] + out[i + 1][0]) / 2;
+                const zc = (out[i][1] + out[i + 1][1]) / 2;
+                ctx.quadraticCurveTo(px(out[i][0]), py(out[i][1]), px(xc), py(zc));
+              }
+              ctx.lineTo(px(out[out.length - 1][0]), py(out[out.length - 1][1]));
+              ctx.stroke();
+            }
+          }
+
+          // The scrub proper: a tight arc where the wheels were turned at
+          // walking pace. Painted directly rather than through `drivenPath`
+          // because there is no dusty centre strip to a scrub mark - it is one
+          // tyre, sideways, and the whole point is that it is a hard dark line.
+          const arcs = 2 + Math.floor(rng() * 3);
+          for (let a = 0; a < arcs; a++) {
+            const r = 2.2 + rng() * 3.4;
+            const cx = x - from * (0.6 + rng() * 1.8);
+            const cz = z + side * (r - 0.15 - rng() * 0.3);
+            const a0 = -Math.PI / 2 - side * 0.5 + (rng() - 0.5) * 0.5;
+            const sweep = (0.34 + rng() * 0.42) * -side * from;
+            for (const [w, tone, tint, alpha, bl] of [
+              [0.42, 0.82, 0.16, 0.4, 0.22],
+              [0.17, 0.58, 0.44, 0.72, 0.05],
+            ] as const) {
+              blur(ctx, m(bl));
+              ctx.strokeStyle = ov(tone, -0.2, tint, alpha * (0.6 + rng() * 0.5));
+              ctx.lineWidth = m(w);
+              ctx.beginPath();
+              ctx.arc(px(cx), py(cz), m(r), a0, a0 + sweep, sweep < 0);
+              ctx.stroke();
+            }
+          }
+        }
+      }
+    }
+  };
+  if (!FORCE.noscrub) stanceScrub();
+
+  /**
+   * The grime band along the kerb line, where a sweeper never reaches.
+   *
+   * The scan said the kerb is *cleaner* than the forecourt it borders — oil tint
+   * 22 against 33 — which is backwards. Grit, leaf litter and washed fines pile
+   * against a vertical face and stay there.
+   *
+   * `grime` and `swept` are consumed here rather than assumed, and they are
+   * consumed as **normalised lerp weights, not as bare multipliers**. Both are
+   * bimodal 0..1 with a p50 near zero and a p95 near one, so a bare multiply
+   * would leave most of the band untouched and then saturate a few metres of it
+   * — and Building found the same mistake with `fines` making a wall *cleaner*.
+   * Normalising against p95 rather than the max keeps a single outlier from
+   * setting the scale for the whole band.
+   */
+  const P95 = 0.95;
+  const bandWeight = (x: number, z: number) => {
+    if (!accum) return 0.55;
+    const g = Math.min(1, accum.grime(x, z) / P95);
+    const s = Math.min(1, accum.swept(x, z) / P95);
+    // Standing water deposits, sweeping and traffic remove. Floored rather than
+    // allowed to reach zero: a band that vanishes in places reads as a dashed
+    // line, and the physical claim is "less here", not "none here".
+    return Math.max(0.18, 0.3 + 0.7 * g - 0.45 * s);
+  };
+
+  if (!FORCE.nokerb) {
+    // The forecourt's two long kerb lines, plus the pad edge behind the pumps.
+    const runs: [number, number, number, number][] = [
+      [FORECOURT.minX + 0.1, FORECOURT.minZ + 0.6, FORECOURT.minX + 0.1, FORECOURT.maxZ - 0.6],
+      [FORECOURT.maxX - 0.1, FORECOURT.minZ + 0.6, FORECOURT.maxX - 0.1, FORECOURT.maxZ - 0.6],
+    ];
+    for (const [x1, z1, x2, z2] of runs) {
+      const len = Math.hypot(x2 - x1, z2 - z1);
+      // Stepped rather than stroked, so the weight can vary along the run. A
+      // single stroke could only carry one value and would be a stripe.
+      const steps = Math.max(8, Math.round(len / 0.55));
+      for (let i = 0; i < steps; i++) {
+        const t = (i + 0.5) / steps;
+        const x = x1 + (x2 - x1) * t;
+        const z = z1 + (z2 - z1) * t;
+        const w = bandWeight(x, z);
+        // Inward from the kerb face: fines pile up against it and thin out.
+        const inward = x < 0 ? 1 : -1;
+        for (const [off, wide, tone, alpha] of [
+          [0.62, 1.15, 0.88, 0.34],
+          [0.2, 0.44, 0.72, 0.6],
+        ] as const) {
+          blur(ctx, m(0.16));
+          ctx.fillStyle = ov(tone, 0.06, 0.22, alpha * w);
+          ctx.beginPath();
+          ctx.ellipse(
+            px(x + inward * off),
+            py(z),
+            m(wide * 0.5),
+            m(0.42 + rng() * 0.3),
+            0,
+            0,
+            Math.PI * 2,
+          );
           ctx.fill();
         }
       }

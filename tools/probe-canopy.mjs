@@ -43,6 +43,7 @@ import {
   makeLensMap,
   makeSoffitLampMap,
   makeSoffitLightmap,
+  makeUnderDeckField,
   slabTop,
 } from "../src/gen/canopyParts.ts";
 import {
@@ -55,7 +56,7 @@ import {
 } from "../src/gen/canopyParts.ts";
 import { TYPE, makeOverflowStain } from "../src/gen/canopySignage.ts";
 import { makeContactShadow } from "../src/gen/contactShadow.ts";
-import { FORECOURT, ISLAND, ISLANDS, groundHeight } from "../src/site.ts";
+import { FORECOURT, ISLAND, ISLANDS, SUN, groundHeight } from "../src/site.ts";
 
 let failures = 0;
 const ok = (name, cond, detail = "") => {
@@ -877,6 +878,101 @@ console.log("\ncost this system adds:");
       `                       = ${(texBytes / 1048576).toFixed(2)} MB, ${((texBytes * 4) / 3 / 1048576).toFixed(2)} MB with mips`
   );
   ok("under a 20 000 triangle self-imposed ceiling", tris < 20000, `${Math.round(tris)}`);
+}
+
+/* ------------------------------------------------------------------ */
+/* where the deck's shadow actually goes, and the under-deck field     */
+/* ------------------------------------------------------------------ */
+/*
+ * Both of these exist because a claim was made in prose and believed. Terrain
+ * attributed the forecourt's flatness to this deck's shadow by applying its
+ * reach along +Z; the sun is at azimuth 203.4 degrees, so 91.8% of the
+ * displacement is in X and the shadow misses the forecourt entirely (NOTES 68).
+ * The doc comments on `canopy.underDeck` now assert that in prose, which is
+ * exactly the state NOTES 43 warns about, so it is asserted here instead — if
+ * `SUN`, the deck rect or the clear height moves, this fails rather than the
+ * documentation quietly going stale.
+ */
+console.log("\nthe deck's shadow, by ray cast rather than by displacement arithmetic:");
+{
+  const el = SUN.elevation;
+  const az = SUN.azimuth;
+  const S = [Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az)];
+  const hits = (p, b) => {
+    let t0 = 1e-6;
+    let t1 = 1e9;
+    for (let a = 0; a < 3; a++) {
+      if (Math.abs(S[a]) < 1e-9) {
+        if (p[a] < b[a * 2] || p[a] > b[a * 2 + 1]) return false;
+        continue;
+      }
+      let ta = (b[a * 2] - p[a]) / S[a];
+      let tb = (b[a * 2 + 1] - p[a]) / S[a];
+      if (ta > tb) [ta, tb] = [tb, ta];
+      t0 = Math.max(t0, ta);
+      t1 = Math.min(t1, tb);
+      if (t0 > t1) return false;
+    }
+    return true;
+  };
+  const deck = [CANOPY.minX, CANOPY.maxX, lv.dripY, lv.roofY, CANOPY.minZ, CANOPY.maxZ];
+  const cols = CANOPY.columns.map((c) => [
+    c.x - CANOPY.colBaseW / 2,
+    c.x + CANOPY.colBaseW / 2,
+    islandTop(c.x, c.z) - 0.2,
+    lv.soffitY,
+    c.z - CANOPY.colBaseW / 2,
+    c.z + CANOPY.colBaseW / 2,
+  ]);
+  let n = 0;
+  let byDeck = 0;
+  let byCol = 0;
+  for (let z = FORECOURT.minZ; z <= FORECOURT.maxZ; z += 0.2) {
+    for (let x = FORECOURT.minX; x <= FORECOURT.maxX; x += 0.2) {
+      const p = [x, groundHeight(x, z) + 0.005, z];
+      n++;
+      if (hits(p, deck)) byDeck++;
+      if (cols.some((b) => hits(p, b))) byCol++;
+    }
+  }
+  ok(
+    "the deck shadows none of the forecourt, which is what the service documents",
+    byDeck === 0,
+    `${byDeck}/${n} samples`
+  );
+  ok(
+    "the columns do shadow some of it, so the ray test is not vacuously passing",
+    byCol > n * 0.03,
+    `${((byCol / n) * 100).toFixed(2)}% of the forecourt, as four streaks`
+  );
+
+  const field = makeUnderDeckField(shade, lv.soffitY, groundHeight, FORECOURT);
+  let bad = 0;
+  let over = 0;
+  let lo = Infinity;
+  let hi = 0;
+  for (let z = FORECOURT.minZ - 2; z <= FORECOURT.maxZ + 2; z += 0.31) {
+    for (let x = FORECOURT.minX - 2; x <= FORECOURT.maxX + 2; x += 0.29) {
+      const v = field.ambientScale(x, z);
+      if (!Number.isFinite(v) || v <= 0) bad++;
+      // The bound is the whole point of combining the two halves into one
+      // field: an occluder must not brighten the ground it shades.
+      if (v > 1.0001) over++;
+      lo = Math.min(lo, v);
+      hi = Math.max(hi, v);
+    }
+  }
+  ok("ambientScale is finite and positive everywhere, 2 m outside the rect included", bad === 0, `${bad} bad`);
+  ok("and never exceeds 1, so the deck cannot brighten the ground it shades", over === 0, `max ${hi.toFixed(4)}`);
+  ok(
+    "it carries a gradient rather than a constant, or there would be no point publishing it",
+    hi / lo > 1.04,
+    `${lo.toFixed(3)}..${hi.toFixed(3)}, ${(((hi - lo) / lo) * 100).toFixed(1)}% range`
+  );
+  console.log(
+    `  amplitude for a consumer: ${field.stats.ambientAtDripLine} at the drip line, ` +
+      `${field.stats.ambientAtDeckCentre} mid-bay, ${field.stats.ambientInOpen} on the apron`
+  );
 }
 
 console.log(`\n${failures ? `PROBE FAILED: ${failures} check(s)` : "all checks passed"}`);

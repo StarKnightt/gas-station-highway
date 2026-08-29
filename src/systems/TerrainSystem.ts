@@ -5,7 +5,7 @@ import { initPhases } from "../core/initPhase";
 import { gridSurface, gridSurfaceGraded, ragEdge, ragOffset, solidColors, stripeGeometry, sweepProfile } from "../gen/geo";
 import { makeSiteOverlay } from "../gen/siteOverlay";
 import { makeAsphalt, makeConcrete, makeDirt, makeMacroNoise, makePaint, SurfaceMaps } from "../gen/textures";
-import { applyWorldDetail } from "../gen/worldDetail";
+import { applyWorldDetail, type WorldDetailOptions } from "../gen/worldDetail";
 import { makeSoilField } from "../gen/groundSoil";
 import { makeAccumField, type GroundAccum } from "../gen/groundAccum";
 import { makeRng } from "../gen/noise";
@@ -17,6 +17,9 @@ import { CANOPY } from "../gen/canopyParts";
 import {
   DRIVEWAYS,
   FORECOURT,
+  FORECOURT_POOLS,
+  FORECOURT_MIRROR_DEPTH,
+  forecourtPoolLevel,
   groundHeight,
   ISLAND,
   ISLANDS,
@@ -35,6 +38,17 @@ import {
 const V2 = (x: number, y: number) => new THREE.Vector2(x, y);
 
 /**
+ * The rendered top face of the concrete forecourt slabs: 20 mm proud of the
+ * asphalt they butt against.
+ *
+ * Module scope rather than a local in `init`, so that the forecourt pool water
+ * levels are derived from the identical function the slab mesh is built from.
+ * Two expressions of "the slab surface" is how a feature gets authored against
+ * one surface and rendered from another, which erased the entrance ruts.
+ */
+const SLAB_TOP = (x: number, z: number) => padY(x, z) + 0.021;
+
+/**
  * Terrain-only diagnostic switches, `?tforce=a,b`.
  *
  * Separate from `?force=` in site.ts, which drives the height field and the
@@ -49,6 +63,14 @@ const V2 = (x: number, y: number) => new THREE.Vector2(x, y);
  * module evaluation where it would take the whole page down.
  */
 const TFORCE_TOKENS = [
+  /**
+   * Removes the `fines` acceptance floor, restoring the bare `fines * 0.9`
+   * gate. The forced-off control for the open-dirt scatter: the spawn
+   * foreground must move between this arm and the default, and the rest of the
+   * frame must not. Total stone count is identical in both arms, so anything
+   * this arm changes is placement and nothing is a count effect.
+   */
+  "noopendirt",
   /** antiTile off everywhere: the control for the tiling measurement. */
   "notile",
   /** Flat albedo and flat roughness, so only the normal map draws. */
@@ -81,6 +103,26 @@ const TFORCE_TOKENS = [
    */
   "thindebris",
   /**
+   * Per-instance stone tone off, so every stone is the shared geometry's tone
+   * again. This is the control for the spawn verge finding: `stoneGeo` is one
+   * geometry shared by every instance, so the per-vertex colour array written
+   * onto it gave all 24000 stones the *identical* twelve-vertex tone pattern.
+   * A field of one object at one tone is repetitive in identity while having no
+   * spatial period at all, which is why `probe-period.mjs` reports the region
+   * non-periodic (max r 0.235, disagreeing lags) while Film reads it as
+   * "visibly repetitive". Both are correct about different quantities.
+   */
+  "flatgravel",
+  /**
+   * Stone size and count back to the 14-76 mm / 24000 arm.
+   *
+   * Separate from `flatgravel` because the tone and the scale are two claims:
+   * one says the marks are indistinguishable from each other, the other says
+   * they are all the same size and the smallest are below what the near field
+   * can resolve. Forcing them off together would not say which one moved.
+   */
+  "finegravel",
+  /**
    * The canopy rain shadow off, so the forecourt is uniformly damp.
    *
    * This is the control for the dry patch specifically, separate from `nowet`.
@@ -90,6 +132,33 @@ const TFORCE_TOKENS = [
    * because both arms move the same pixels.
    */
   "noshelter",
+  /**
+   * The drying stain around the forecourt pools, without removing the pools.
+   *
+   * Separate from `nowet` and from site.ts's `nofpool` because the three answer
+   * different questions. `nofpool` removes the basins and therefore the whole
+   * feature; `nowet` removes every water arm on every surface; this leaves the
+   * water and removes only the saturated ground around it. If the pools read as
+   * placed objects, that is the arm that says whether the halo was the thing
+   * making them belong.
+   */
+  "nostain",
+  /**
+   * The reduced-detail material path, WITHOUT changing the tier — the isolated
+   * arm for the program-count hook.
+   *
+   * `?tier=low` moves the shadow filter, the shadow map size, world capture and
+   * the detail patches together, so a program count that falls under it cannot
+   * be attributed to this hook. The instruction was to prove
+   * `renderer.info.programs.length` actually falls rather than that a flag
+   * parsed, and a whole-tier measurement cannot establish that for one lever.
+   * With this token the only thing that changes between two runs is the eight
+   * `applyWorldDetail` variants, so the delta is the hook's and nobody else's.
+   *
+   * Borrowed from BuildingSystem's `?bgtrans=0`, which exists for exactly this
+   * reason.
+   */
+  "lodetail",
 ] as const;
 type TForce = Record<(typeof TFORCE_TOKENS)[number], boolean>;
 
@@ -151,6 +220,12 @@ export class TerrainSystem implements GameSystem {
   private ownedTextures = new Set<THREE.Texture>();
   /** Field textures bound through the injection, not through a material slot. */
   private fieldTextures: THREE.Texture[] = [];
+
+  /**
+   * `quality.detailPatches === false`, or the isolated `?tforce=lodetail` arm.
+   * Set in `init` before any material is built; see the comment there.
+   */
+  private reducedDetail = false;
   /** The rendered ground surface, not the height field. See `geo.ts`. */
   private groundSurfaceAt: (x: number, z: number) => number = () => 0;
   private groundSpacing: Record<string, number> | null = null;
@@ -169,6 +244,36 @@ export class TerrainSystem implements GameSystem {
     const TF = readTForce();
     assertSiteForceRecognised();
     game.provide("groundHeight", groundHeight);
+
+    /**
+     * The compile-time tier hook for this system.
+     *
+     * `applyWorldDetail` produces one shader program per material it touches and
+     * this system hands it eight materials, so eight of the scene's programs are
+     * Terrain's — and they are the largest, at roughly 39 kB of injected
+     * fragment source each. On a host where the cold load is ~92% driver link
+     * time, that is a compile-time item rather than a frametime one.
+     *
+     * Read once, here, and baked into the materials. It cannot be adapted later:
+     * by frame 1 the programs exist, and changing this would recompile all eight
+     * — a multi-second stall on the machine least able to afford one, causing
+     * exactly the freeze the tier was avoiding. `AdaptiveQuality` knows this and
+     * steps only the run-time family.
+     *
+     * Defaults true when `quality` is absent so the headless layout path and any
+     * older caller cannot silently lose the high-tier ground.
+     */
+    this.reducedDetail = !(ctx.quality?.detailPatches ?? true) || TF.lodetail;
+
+    /**
+     * Every `applyWorldDetail` call in this system goes through here, so the
+     * tier flag cannot be attached to seven materials and forgotten on the
+     * eighth. One forgotten material would keep its own full-size program, and
+     * the symptom — a program count that falls by seven instead of eight — is
+     * indistinguishable from the hook simply not being worth much.
+     */
+    const detail = (m: THREE.MeshStandardMaterial, opts: Omit<WorldDetailOptions, "reduced">) =>
+      applyWorldDetail(m, { ...opts, reduced: this.reducedDetail });
 
     /* ---------------- procedural material library ---------------- */
     const asphaltMaps = phase.of("asphalt 2048", () => makeAsphalt(2048, 8, 1337));
@@ -191,7 +296,24 @@ export class TerrainSystem implements GameSystem {
     const paintWhite = phase.of("paint white", () => makePaint(1024, 77, false));
     const paintYellow = phase.of("paint yellow", () => makePaint(1024, 178, true));
     const macro = phase.of("macro noise 512", () => makeMacroNoise(512, 5150));
-    const site = phase.of("site overlay", () => makeSiteOverlay());
+
+    /**
+     * The soil field and the accumulation service are built *before* the site
+     * overlay, so the overlay can paint with them.
+     *
+     * They used to be built after it, which meant the one place in this system
+     * that authors dirt at specific places on the ground could not ask the one
+     * service that models where dirt collects. Both are pure functions of world
+     * XZ with no dependency on anything between here and their old position, so
+     * moving them is a reorder rather than a refactor. `makeAccumField` costs
+     * nothing measurable; `makeSoilField` is about 0.8 s and is unchanged, so
+     * the phase report simply attributes it earlier.
+     */
+    phase("soil field");
+    const soilField = makeSoilField();
+    const accum = makeAccumField(soilField);
+
+    const site = phase.of("site overlay", () => makeSiteOverlay(accum));
     /**
      * The world-space field textures, held explicitly.
      *
@@ -214,9 +336,8 @@ export class TerrainSystem implements GameSystem {
     this.surfaces.push(asphaltMaps, concreteMaps, dirtMaps, dirtFineMaps);
 
     /* ---------------- the soil field, and its published service ---------------- */
-    phase("soil field + service");
+    phase("soil service");
 
-    const soilField = makeSoilField();
     this.fieldTextures.push(soilField.texture);
     // `nosoil` is the control that must move pixels: if a capture with it on is
     // identical to one without, the field is not wired up and no amount of
@@ -302,7 +423,8 @@ export class TerrainSystem implements GameSystem {
      * that twice tonight; the gravel spill and the litter below are the proof
      * that the numbers coming out of these functions land somewhere.
      */
-    const accum = makeAccumField(soilField);
+    // Built earlier, beside the soil field, so the site overlay could paint with
+    // it. Published here, unchanged, next to the debris that consumes it.
     game.provide("groundAccum", accum);
 
     /* ---------------- the pavement edge, as a function rather than a number ---------------- */
@@ -448,7 +570,7 @@ export class TerrainSystem implements GameSystem {
       wheelDark: FORCE.wheel ? 0 : 0.58,
       wheelViz: FORCE.wheelViz,
     };
-    applyWorldDetail(asphalt, { ...asphaltDetail, key: "asphalt" });
+    detail(asphalt, { ...asphaltDetail, key: "asphalt" });
 
     // The highway and the station's own paving were laid years apart by
     // different contractors, so they are not the same mix: the lot is an older,
@@ -477,7 +599,7 @@ export class TerrainSystem implements GameSystem {
       asphaltLot.color.set(0xff00ff);
       for (const t of Object.values(lotMaps)) t.repeat.multiplyScalar(3);
     }
-    applyWorldDetail(asphaltLot, { ...asphaltDetail, key: "asphalt-lot" });
+    detail(asphaltLot, { ...asphaltDetail, key: "asphalt-lot" });
 
     const concrete = new THREE.MeshStandardMaterial({
       map: concreteMaps.map,
@@ -554,15 +676,47 @@ export class TerrainSystem implements GameSystem {
               // Not zero: tyres track water in off the apron all night.
               floor: 0.3,
             },
+        /**
+         * Standing water on the forecourt, which had none.
+         *
+         * The full argument for the positions is on `FORECOURT_POOLS`; the two
+         * things to know here are that the gate radii are 15% larger than the
+         * height-field dish and that the level is measured, not authored.
+         *
+         * The gate margin matters. `wdPoolOne` cuts the pool off at r = 1.06 of
+         * these radii regardless of depth, so if the water's zero-depth contour
+         * reached the gate the shoreline would become a hard ellipse — the exact
+         * "feathered decal following no geometry" the critic named twice. At 1.15
+         * the depth crosses zero well inside the gate everywhere, so the edge is
+         * always the terrain contour and the ellipse is never seen.
+         */
+        /**
+         * See the parameter's note. Asphalt does not set this and keeps 0.020,
+         * so the three ramps there evaluate to the literals they used to be and
+         * the LOW_SPOTS pools are unchanged to the bit.
+         */
+        mirrorDepth: FORECOURT_MIRROR_DEPTH,
+        // The receding stain. `?tforce=nostain` is its control arm; the pools
+        // stay, so the two halves of the feature can be told apart.
+        stain: TF.nowet || TF.nostain ? 0 : 1,
+        pools: TF.nowet
+          ? []
+          : FORECOURT_POOLS.map((p) => ({
+              x: p.x,
+              z: p.z,
+              rx: p.rx * 1.15,
+              rz: p.rz * 1.15,
+              level: forecourtPoolLevel(p, SLAB_TOP),
+            })),
       },
     };
-    applyWorldDetail(concrete, { key: "concrete", ...concreteDetail });
+    detail(concrete, { key: "concrete", ...concreteDetail });
 
     // Curbs and islands carry baked contact occlusion in their vertex colours,
     // which needs its own program.
     const concreteAo = concrete.clone();
     concreteAo.vertexColors = true;
-    applyWorldDetail(concreteAo, { key: "concrete-ao", ...concreteDetail });
+    detail(concreteAo, { key: "concrete-ao", ...concreteDetail });
 
     const dirt = new THREE.MeshStandardMaterial({
       map: dirtMaps.map,
@@ -586,7 +740,7 @@ export class TerrainSystem implements GameSystem {
     }
     if (TF.albedoonly) dirt.normalScale.set(0, 0);
 
-    applyWorldDetail(dirt, {
+    detail(dirt, {
       key: "dirt",
       macro,
       macroMetres: 78,
@@ -625,7 +779,7 @@ export class TerrainSystem implements GameSystem {
         polygonOffsetFactor: -6,
         polygonOffsetUnits: -6,
       });
-      applyWorldDetail(m, {
+      detail(m, {
         key,
         macro,
         macroMetres: 17,
@@ -683,7 +837,7 @@ export class TerrainSystem implements GameSystem {
       metalness: 0,
       envMapIntensity: 0.42,
     });
-    applyWorldDetail(jointFiller, {
+    detail(jointFiller, {
       key: "joint-filler",
       macro,
       macroMetres: 13,
@@ -881,7 +1035,7 @@ export class TerrainSystem implements GameSystem {
     phase("forecourt slabs");
     // 20 mm proud of the asphalt, with 55 mm saw cuts that read as actual
     // grooves rather than single-pixel hairlines.
-    const slabTop = (x: number, z: number) => padY(x, z) + 0.021;
+    const slabTop = SLAB_TOP;
     const joint = 0.055;
     const cols = 6;
     const rows = 4;
@@ -1235,23 +1389,87 @@ export class TerrainSystem implements GameSystem {
     // across seen from 1.6 m is already more than it needs. Non-uniform scale
     // per instance does the shape variation that geometry would otherwise buy.
     const stoneGeo = new THREE.IcosahedronGeometry(1, 0);
+    /**
+     * White, because the tone now arrives per instance. See below.
+     */
     const stoneMat = new THREE.MeshStandardMaterial({
-      color: 0x8a7f70,
+      color: 0xffffff,
       roughness: 0.92,
       metalness: 0,
       vertexColors: true,
       dithering: true,
     });
     this.materials.push(stoneMat);
-    // Per-vertex tone so a field of stones is not one colour at two sizes.
+    /**
+     * Facet-to-facet tone within one stone. This is all the per-vertex array
+     * can buy, and the comment it replaces claimed more than that.
+     *
+     * The old comment read "per-vertex tone so a field of stones is not one
+     * colour at two sizes" — but `stoneGeo` is ONE geometry shared by all
+     * 24000 instances, so writing a colour attribute onto it gave every stone
+     * in the field the identical twelve-vertex pattern. The field was one
+     * object at one tone, 24000 times, differing only by rotation and by a
+     * non-uniform scale. That is the "visibly repetitive" Film reported in the
+     * spawn frame, and it is invisible to a periodicity probe because there is
+     * no spatial period involved: the repetition is in identity.
+     *
+     * Tightened from 0.72-1.22 to 0.88-1.08 so it varies facets without
+     * swamping the instance tone that now carries the actual colour.
+     */
     const sc = new Float32Array(stoneGeo.getAttribute("position").count * 3);
     for (let i = 0; i < sc.length; i += 3) {
-      const v = 0.72 + rng() * 0.5;
+      const v = 0.88 + rng() * 0.2;
       sc[i] = v;
-      sc[i + 1] = v * (0.96 + rng() * 0.07);
-      sc[i + 2] = v * (0.88 + rng() * 0.08);
+      sc[i + 1] = v * (0.97 + rng() * 0.05);
+      sc[i + 2] = v * (0.92 + rng() * 0.06);
     }
     stoneGeo.setAttribute("color", new THREE.BufferAttribute(sc, 3));
+
+    /**
+     * Per-instance lithology, which is the fix for the spawn verge.
+     *
+     * The measurement that produced these numbers: the verge at spawn is the
+     * FLATTEST region in the lower frame, not the busiest — luma p10-p90 spread
+     * 14 in the immediate foreground and 20 mid-band, against 34 on the
+     * forecourt and 42 on the dirt beyond the lot that has no gravel on it at
+     * all. Adding 24000 stones *reduced* the tonal variation of the region they
+     * cover, and the reason is that the stone base tone was luma 128.3 against
+     * the soil's lightest palette entry at 125.2 — a 2.5% difference. Twenty-four
+     * thousand marks the same value as their background add spatial frequency
+     * and no contrast, so the region goes busy and flat at once.
+     *
+     * Real gravel is not the soil it lies on: it is a different rock, it arrived
+     * from a quarry, and a spill contains several lithologies at once. So the
+     * spread here is deliberately wide in value — dark basalt through pale
+     * caliche — which is what lets a clump read as a patch of another material
+     * rather than as a busier patch of the same one.
+     *
+     * Cost is one Float32Array of 3 floats per instance and no extra draw call.
+     */
+    const litho: Array<[number, number]> = [
+      // [hex, share] — shares are cumulative-normalised below.
+      [0x6b6257, 0.34], // mid grey-brown, the bulk of a crushed spill
+      [0x4a443d, 0.22], // dark, wet-looking basalt
+      [0x8f8778, 0.18], // light grey, the tone the whole field used to be
+      [0xb5ac98, 0.12], // pale caliche / limestone, the highlights of a spill
+      [0x6e5544, 0.09], // reddish, matching the local soil for the few that are
+      [0x322e29, 0.05], // near-black, so the field has a true dark end
+    ];
+    const lithoTotal = litho.reduce((s, l) => s + l[1], 0);
+    const stoneCol = new THREE.Color();
+    const pickLitho = (): THREE.Color => {
+      let r = rng() * lithoTotal;
+      let hex = litho[0][0];
+      for (const [h, share] of litho) {
+        r -= share;
+        hex = h;
+        if (r <= 0) break;
+      }
+      stoneCol.setHex(hex, THREE.SRGBColorSpace);
+      // Within-lithology value spread, so the six entries do not read as six.
+      const v = 0.78 + rng() * 0.44;
+      return stoneCol.multiplyScalar(v);
+    };
 
     /**
      * 1500 -> 9000, and the count is not the point; the DISTRIBUTION was.
@@ -1274,7 +1492,19 @@ export class TerrainSystem implements GameSystem {
      *
      * Cost is reported by `__TERRAIN.triangles` rather than estimated here.
      */
-    const STONES = TF.thindebris ? 9000 : 24000;
+    /**
+     * 24000 -> 12000, because the stones got larger and the mark count is the
+     * thing being reduced.
+     *
+     * Median radius goes 29.5 mm -> 54.2 mm, so the covered area per stone
+     * rises 3.38x. Halving the count leaves 1.69x the ground coverage with HALF
+     * the marks, which is the shape of the change: same visual mass, coarser
+     * grain. It also returns about 240000 triangles, since each stone is 20.
+     *
+     * `thindebris` stays pinned at 9000 so Perf's triangle-cost comparison
+     * still means what it meant.
+     */
+    const STONES = TF.thindebris ? 9000 : TF.finegravel ? 24000 : 12000;
     const stones = new THREE.InstancedMesh(stoneGeo, stoneMat, STONES);
     const m = new THREE.Matrix4();
     const q = new THREE.Quaternion();
@@ -1374,13 +1604,78 @@ export class TerrainSystem implements GameSystem {
        */
       if (pavedDistance(x, z) < 0.12) continue;
 
-      // The service decides the rest. `fines` already folds in shelter, traffic
-      // and scour, so this is one call and no local rules. Its p50 is 0.147 and
-      // its p95 0.68, so a bare comparison against a uniform deviate keeps the
-      // clumping the field already carries rather than flattening it.
-      if (rng() > accum.fines(x, z) * 0.9) continue;
+      /**
+       * The service decides the rest. `fines` already folds in shelter, traffic
+       * and scour, so this is one call and no local rules.
+       *
+       * The floor is the fix for the spawn foreground. A bare `fines * 0.9`
+       * makes acceptance proportional to a field whose p50 is 0.147, so ground
+       * in the low tail is refused about 95 times in 100 — not because the
+       * scatter avoids it by rule, but because the deviate almost always wins.
+       * **Film's band measures `fines` 0.040-0.077 against a site p50 of
+       * 0.147**, so it sat in the worst quarter of the site for a gate nobody
+       * wrote as an exclusion, and rendered as bare dirt at 2.0x magnification
+       * across the bottom third of the spawn frame.
+       *
+       * WHICH BRANCH ACTUALLY FEEDS IT, because I assumed wrong first. The band
+       * unprojects to z 5.55-7.5 and the road edge is at z 5.16, so **it is a
+       * road verge, not open ground** — 0.4-2.3 m out from pavement. The
+       * `-300..300` road-edge branch already aims there; `fines` was throttling
+       * it. Attributing the band's stones by branch over 8 seeds:
+       *
+       *              band stones   from open-ground disc   from road-edge branch
+       *   no floor       1.63              0.13                    1.50
+       *   floor 0.30     5.88              0.63                    5.25
+       *
+       * So scoping the floor to open ground only — which is what "let stones
+       * land in open dirt" literally asks for — measured 0.37/m2, *below* the
+       * unfloored 0.44. The fix has to be site-wide to reach the branch that
+       * serves this band.
+       *
+       * The floor costs no stones. The loop runs to a fixed `STONES`, so
+       * acceptance sets *where* they land and never how many. Over 8 seeds the
+       * band goes 0.44 -> 1.59 stones/m2 and stones within 15 m of the spawn eye
+       * go 324 -> 452, while open dirt and the ground behind the pad both stay
+       * populated.
+       *
+       * WHAT IT COSTS. Lifting the low tail also lifts the road-edge branch far
+       * from the camera, where `fines` is 0.014: its share goes 21% -> 41% and
+       * stones beyond 60 m go 6829 -> 7162. That is a 5% rise in stones nobody
+       * can resolve, bought with no extra triangles. Worth it for 3.6x in the
+       * frame the user screenshots, but the real waste is pre-existing and
+       * larger — **57% of the scatter is already beyond 60 m** because that
+       * branch spreads over 600 m of highway. Narrowing its x range would pay
+       * far better than this floor did; it is a distribution change and out of
+       * scope tonight.
+       *
+       * 0.30 rather than higher because `fines` still differentiates above
+       * 0.333 and p95 is 0.682, so the top of the field keeps organising the
+       * scatter. A floor of 0.50 puts 7.4 stones in the band instead of 5.9 and
+       * empties the ground behind the pad, trading one bare region for another.
+       */
+      if (rng() > Math.max(accum.fines(x, z) * 0.9, TF.noopendirt ? 0 : 0.3)) continue;
 
-      const size = 0.014 + Math.pow(rng(), 2.0) * 0.062;
+      /**
+       * 14-76 mm -> 24-122 mm, and the exponent 2.0 -> 1.7.
+       *
+       * The old distribution's small end was below what the near field can
+       * resolve, which is the other half of "high-frequency". At the spawn pose
+       * — a level camera 1.65 m above ground, so the bottom frame row is ground
+       * at 3.30 m — the p10 stone stood 5 mm proud, which subtends 1.4 screen
+       * pixels. A 20-facet icosahedron 1.4 px tall is not a stone; it is one
+       * dark dot, and it aliases as the camera moves. The p50 was 3.9 px, which
+       * is not much better: with three or four facets visible each is about a
+       * pixel, so there is no room for the lit facet that makes a lump read as
+       * a lump.
+       *
+       * This is the same resolvability rule as `resolvableOctaves` on the dirt
+       * fbm, applied to geometry instead of to noise: do not author detail
+       * below what the view can resolve, because it does not become detail, it
+       * becomes noise.
+       */
+      const size = TF.finegravel
+        ? 0.014 + Math.pow(rng(), 2.0) * 0.062
+        : 0.024 + Math.pow(rng(), 1.7) * 0.098;
       /**
        * Sunk by 0.18 of the radius, not 0.42.
        *
@@ -1402,6 +1697,9 @@ export class TerrainSystem implements GameSystem {
       // Flattened, because a stone that has been rolled and settled lies down.
       s.set(size * (0.8 + rng() * 0.5), size * (0.45 + rng() * 0.35), size * (0.8 + rng() * 0.5));
       stones.setMatrixAt(placed, m.compose(p, q, s));
+      // `flatgravel` leaves instanceColor unallocated, which is the shipped
+      // behaviour: every stone takes the shared geometry's tone.
+      if (!TF.flatgravel) stones.setColorAt(placed, pickLitho());
       placed++;
     }
     stones.count = placed;

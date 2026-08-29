@@ -58,7 +58,8 @@ console.log("\n--- the control: a clean run must NOT be voided ---");
 {
   const r = evaluateVoidConditions(cleanRun());
   check("clean run counts", r.void === false, `fired=${JSON.stringify(r.fired)} undecidable=${JSON.stringify(r.undecidable)}`);
-  check("all five conditions were evaluated", r.checked.length === 5, `checked ${r.checked.length}`);
+  // Four voting conditions: 2 was downgraded to advisory by ruling (2026-08-29).
+  check("all four voting conditions were evaluated", r.checked.length === 4, `checked ${r.checked.length}`);
   check("nothing undecidable on a complete record", r.undecidable.length === 0);
 }
 
@@ -96,14 +97,27 @@ console.log("\n--- condition 1: baseline drift ---");
 
 console.log("\n--- condition 2: GPU busy while parked ---");
 {
+  // DOWNGRADED TO ADVISORY BY RULING, 2026-08-29. These assertions now assert the
+  // OPPOSITE of what they originally did, deliberately.
+  //
+  // The premise was "a static camera cannot pin the GPU". That is false for this
+  // build: the renderer has no frame cap, so it pins the card near 100% whenever
+  // the scene is up, and it measured 99% during the one exclusive quiet window
+  // this project ever got. The quantity the condition actually wanted — another
+  // process's share — is not attributable per process on WDDM.
+  //
+  // A gate no valid run can pass is not a gate, it is a permanent failure, and it
+  // dilutes the conditions that mean something.
   const o = cleanRun();
-  o.vram.phases.find((p) => p.phase === "parked-control").utilMeanPct = 95; // as observed under contention
+  o.vram.phases.find((p) => p.phase === "parked-control").utilMeanPct = 95;
   const r = evaluateVoidConditions(o);
-  check("fires at 95% parked utilisation", r.void && r.fired.some((f) => f.id === 2));
+  check("95% parked utilisation does NOT void", r.void === false, JSON.stringify(r.fired));
+  check("it is reported as an advisory instead", r.advisories.some((a) => /GPU busy while parked/.test(a)));
+  check("and it is not a voting condition", !r.checked.some((c) => c.id === 2));
 
   const o2 = cleanRun();
-  o2.vram.phases.find((p) => p.phase === "parked-control").utilMeanPct = LIMITS.parkedGpuUtilPct;
-  check("fires at exactly the limit", evaluateVoidConditions(o2).fired.some((f) => f.id === 2));
+  o2.vram.phases.find((p) => p.phase === "parked-control").utilMeanPct = 100;
+  check("even 100% does not void", evaluateVoidConditions(o2).void === false);
 }
 
 console.log("\n--- condition 3: a phase minimum below baseline ---");
@@ -163,13 +177,15 @@ console.log("\n--- undecidable is not the same as passing ---");
   delete o.vram;
   const r = evaluateVoidConditions(o);
   check("a run with no VRAM data is void", r.void === true);
-  check("conditions 1-3 are undecidable, not passed", [1, 2, 3].every((id) => r.undecidable.some((u) => u.id === id)), JSON.stringify(r.undecidable));
-  check("none of 1-3 is reported as checked", ![1, 2, 3].some((id) => r.checked.some((c) => c.id === id)));
+  check("conditions 1 and 3 are undecidable, not passed", [1, 3].every((id) => r.undecidable.some((u) => u.id === id)), JSON.stringify(r.undecidable));
+  check("neither 1 nor 3 is reported as checked", ![1, 3].some((id) => r.checked.some((c) => c.id === id)));
 
   const o2 = cleanRun();
   o2.vram.phases = o2.vram.phases.filter((p) => p.phase !== "parked-control");
   const r2 = evaluateVoidConditions(o2);
-  check("a missing parked control is undecidable", r2.undecidable.some((u) => u.id === 2) && r2.void);
+  // Advisory now, so it cannot void on its own account -- but it must still be
+  // *said* rather than silently dropped, which is the whole point of the change.
+  check("a missing parked control is reported, not silently dropped", r2.advisories.some((a) => /not sampled/.test(a)));
 
   const o3 = cleanRun();
   delete o3.parked;

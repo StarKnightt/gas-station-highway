@@ -162,6 +162,24 @@ const SHADER_FAIL =
   /program info log|shader error|gl\.getShaderInfoLog|undeclared identifier|VALIDATE_STATUS|THREE\.WebGLProgram/i;
 
 /**
+ * Compiler chatter that is not a failure.
+ *
+ * `THREE.WebGLProgram` prefixes the info log whether the log is an error or a
+ * warning, so the pattern above fires on both. D3D's X4122 — "sum of 1 and
+ * -1.5e-17 cannot be represented accurately in double precision" — is a
+ * constant-folding remark about a term seventeen orders of magnitude below the
+ * one it is added to, emitted by an angle-clamp idiom several systems use. It
+ * failed three otherwise good frames tonight and the failure text is longer
+ * than the frame report, which is how a benign warning starts hiding real ones.
+ *
+ * Deliberately narrow: one named warning code, and only when the log carries no
+ * "error". Anything else still fails, because a shader problem that reaches a
+ * capture is the one class of defect this harness exists to refuse.
+ */
+const SHADER_BENIGN = /warning X4122/i;
+const isShaderFailure = (t) => SHADER_FAIL.test(t) && !(SHADER_BENIGN.test(t) && !/\berror\b/i.test(t));
+
+/**
  * A poisoned environment map, which is worse than a crash because it is silent.
  *
  * NaN or Inf anywhere in the PMREM propagates through every material that
@@ -340,7 +358,7 @@ async function main() {
     const problems = [];
     page.on("console", (m) => {
       const t = m.text();
-      if (m.type() === "error" || SHADER_FAIL.test(t) || WORLD_UNSAFE.test(t)) problems.push(`console: ${t}`);
+      if (m.type() === "error" || isShaderFailure(t) || WORLD_UNSAFE.test(t)) problems.push(`console: ${t}`);
     });
     page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
 
@@ -447,7 +465,29 @@ async function main() {
       } catch {
         renderer = "unavailable";
       }
-      return { calls: r.info.render.calls, tris: r.info.render.triangles, renderer };
+      // `info.programs` is the renderer's live program cache, which is the only
+      // number that predicts the part of this build a user actually suffers: a
+      // cold load is ~92% driver shader compilation, so a tier that cuts
+      // triangles and leaves the program count alone has not helped the four
+      // minutes before anything appears. Reported as null when three does not
+      // expose it, never as zero — see the failure below.
+      const programs = Array.isArray(r.info.programs) ? r.info.programs.length : null;
+      // The count alone cannot say *whose* programs they are, and without that a
+      // flag that removes a shader and a flag that does nothing produce the same
+      // reading. `customProgramCacheKey` puts an owner's name in the key, so the
+      // programs a system is responsible for can be counted separately from the
+      // total — which is how "the count did not move" becomes a diagnosis.
+      const keys = Array.isArray(r.info.programs)
+        ? r.info.programs.map((p) => String(p.cacheKey ?? ""))
+        : [];
+      const foliage = keys.filter((k) => k.includes("foliage-transmission")).length;
+      return {
+        calls: r.info.render.calls,
+        tris: r.info.render.triangles,
+        programs,
+        foliagePrograms: foliage,
+        renderer,
+      };
     });
 
     // Fatal, for the same reason a shader link failure is fatal: a frame drawn
@@ -468,13 +508,27 @@ async function main() {
     const lit = await assertFrameIsLit(file, shot, failures);
     console.log(
       `[shoot6] ${(arm.label ? `${shot}[${arm.label}]` : shot).padEnd(9)} -> ${path.relative(ROOT, file)}  eye y=${applied.y.toFixed(2)}  ` +
-        `draws=${stats?.calls ?? "?"} tris=${stats?.tris ?? "?"}  ` +
+        `draws=${stats?.calls ?? "?"} tris=${stats?.tris ?? "?"} progs=${stats?.programs ?? "?"}(veg ${stats?.foliagePrograms ?? "?"})  ` +
         `gpu=${/NVIDIA|RTX/i.test(liveGpu) ? "hw" : liveGpu}  ` +
         `sky=${lit.skyMean.toFixed(0)} low=${lit.lowMean.toFixed(0)} black=${lit.darkPct.toFixed(0)}%  ` +
         `(${Date.now() - t0} ms)  bundle ${stamp.text}`
     );
 
-    const shaderProblems = problems.filter((p) => SHADER_FAIL.test(p));
+    // A null measurement must fail, not print "?" beside a PASS.
+    //
+    // This is the exact shape that let the tier harness report a pass while the
+    // program column was unmeasured: the only assertion covered instance counts,
+    // so the column that mattered was allowed to be absent. An unavailable
+    // number is not a satisfied criterion, and "?" is the most agreeable thing a
+    // broken probe can print.
+    if (stats && (stats.programs === null || stats.programs === 0)) {
+      failures.push(
+        `${shot}: renderer.info.programs is ${stats.programs} — a frame was drawn, so this is the probe ` +
+          `failing rather than a scene with no shaders, and it is the one column a tier is judged on`
+      );
+    }
+
+    const shaderProblems = problems.filter((p) => isShaderFailure(p));
     if (shaderProblems.length) failures.push(`${shot}: shader failure -> ${shaderProblems[0]}`);
     const worldProblems = problems.filter((p) => WORLD_UNSAFE.test(p));
     if (worldProblems.length)
@@ -503,15 +557,70 @@ async function main() {
         failures.push(`${shot}: A/B requested but one arm never echoed __VEGETATION`);
         continue;
       }
-      const sa = JSON.stringify(a);
-      const sb = JSON.stringify(b);
-      console.log(`[shoot6]   ${shot.padEnd(9)} A ${sa}`);
-      console.log(`[shoot6]   ${" ".repeat(9)} B ${sb}`);
-      if (sa === sb) {
-        failures.push(
-          `${shot}: the B arm echoed the same state as A, so "${AB}" changed nothing in the scene. ` +
-            `Any diff from this pair is noise. Check the token is one VegetationSystem parses.`
-        );
+      console.log(`[shoot6]   ${shot.padEnd(9)} A ${JSON.stringify(a)}`);
+      console.log(`[shoot6]   ${" ".repeat(9)} B ${JSON.stringify(b)}`);
+
+      /*
+       * Assert on the pixels, not on the echo.
+       *
+       * The echo above proves the flag reached the parser and is worth printing,
+       * but it is the wrong thing to assert on: `force` necessarily differs the
+       * moment any `vforce` token parses, so a check comparing the echoes can
+       * never fire for the arms it most needs to police. Written that way first,
+       * and it took a deliberate attempt to make it fail to notice — a check
+       * that cannot fail is the failure mode this harness exists to catch, one
+       * level up.
+       *
+       * Two frames from one bundle differing in zero pixels means the arms are
+       * the same picture, whatever the flags said, and every number taken from
+       * the pair is then a measurement of nothing.
+       */
+      const fa = written.find((f) => path.basename(f) === `${shot}${SUFFIX}.png`);
+      const fb = written.find((f) => path.basename(f) === `${shot}${SUFFIX}_ab.png`);
+      if (!fa || !fb) {
+        failures.push(`${shot}: A/B saved fewer than two frames, so the pair cannot be compared`);
+        continue;
+      }
+      const pa = PNG.sync.read(await fs.readFile(fa));
+      const pb = PNG.sync.read(await fs.readFile(fb));
+      let diff = 0;
+      if (pa.width !== pb.width || pa.height !== pb.height) {
+        failures.push(`${shot}: A/B frames differ in size, which should be impossible in one run`);
+      } else {
+        for (let i = 0; i < pa.data.length; i += 4) {
+          if (
+            pa.data[i] !== pb.data[i] ||
+            pa.data[i + 1] !== pb.data[i + 1] ||
+            pa.data[i + 2] !== pb.data[i + 2]
+          )
+            diff++;
+        }
+        const pct = ((diff / (pa.width * pa.height)) * 100).toFixed(3);
+        /*
+         * The noise floor, measured rather than assumed: `--ab=vlitter=1` sets
+         * the default value, so both arms are the same scene, and the pair still
+         * differs by 118 px in `edge`. Two pages in one browser on one bundle
+         * are not bit-identical. So ~120 px is the floor here, and a result of a
+         * few hundred px is barely above it — which retires the 294 px I had
+         * reported for the skirt in this pose as a real but marginal signal, and
+         * leaves the 9167 px in `underpine` as the only strong one.
+         */
+        const FLOOR = 120;
+        const verdict = diff === 0 ? "IDENTICAL" : diff < FLOOR ? "at or below the ~120 px noise floor" : "signal";
+        console.log(`[shoot6]   ${" ".repeat(9)} differ in ${diff} px (${pct}%) — ${verdict}`);
+        if (diff >= 1 && diff < FLOOR) {
+          console.warn(
+            `[shoot6]   ${" ".repeat(9)} !! treat this as no effect. Two arms of the same scene measure ` +
+              `about 120 px apart in this harness, so anything under that is the harness, not your change.`
+          );
+        }
+        if (diff === 0) {
+          failures.push(
+            `${shot}: the A and B frames are pixel-identical, so "${AB}" changed nothing that renders. ` +
+              `Any diff taken from this pair measures noise. This is a real negative result only if you ` +
+              `expected the arm to be invisible.`
+          );
+        }
       }
     }
   }

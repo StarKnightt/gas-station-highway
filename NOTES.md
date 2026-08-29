@@ -1,5 +1,21 @@
 # Silent failure modes seen in this project
 
+> ## CITE CASES BY TITLE, NEVER BY NUMBER
+>
+> **The numbers in this file are not unique.** Seven agents append concurrently,
+> so at the time of writing there are 84 numbered cases across 52 distinct
+> numbers: 26 numbers are reused and "case 55" matches four different cases. A
+> citation by number is therefore ambiguous, including in reports already written
+> that cite correctly by their author's local numbering.
+>
+> **The file is deliberately not renumbered.** Renumbering would invalidate every
+> citation in every report written tonight, including all the correct ones, which
+> costs more than the ambiguity does. So the numbers stay as a rough chronology
+> and **the title is the identifier.**
+>
+> When adding a case: give it a title that states the lesson as a sentence, and
+> assume the number you pick is already taken.
+
 Cases 1-7, 9-16, 18, 21, 26 and 27 are silent failures. Case 8 is the opposite and
 is documented here anyway, because the outcome was the same. Case 17 is a third
 kind: a feature that reached the screen intact and was read by the eye as the
@@ -375,6 +391,26 @@ whole argument for a check that costs nothing to run and takes no coordinates.
   order, with **each surface selecting its own measurement region**. Written for
   the canopy soffit. See below: it is the only one of the five that solves the
   region problem constructively rather than by avoiding it.
+- `tools/probe-shadowsource.mjs` — which occluder shadows a region, and what
+  fraction, by ray casting toward the real sun vector (case 68). CPU only, no
+  browser, under a second. Written for the canopy after a shadow reach was
+  applied along the wrong axis and cost a full authoring cycle on a forecourt
+  that turned out to be 89% sunlit. **Add a box for your geometry and pass
+  `--rect` before authoring albedo detail onto anything you believe is shaded.**
+  Conservative AABBs, so `shadows NOTHING` is trustworthy and a positive number
+  is an upper bound.
+  - It resolves the elevation from `LightingSystem`'s shipped `SUN_ELEVATION_DEG`,
+    **prints which source it used**, and refuses to run if that disagrees with
+    `site.SUN.elevation` by more than 0.05 degrees. That guard exists because the
+    two disagreed by 11 versus 6.2 for most of a night; a constant no shipping
+    code reads cannot be validated by the scene looking right, so a tool has to
+    do it. `--selftest` fires the guard on the historical case as a positive
+    control, because a guard sitting on a reconciled pair has never been observed
+    to work.
+  - `--elevation=` overrides for what-if sweeps. Worth using whenever a result
+    does *not* move after an input changes: the canopy's 10.97% was identical at
+    11 and 6.2 degrees, and only a sweep distinguished a real invariance with a
+    derivable band from a probe reading a cached value.
 
 #### `probe-rank.mjs` — letting the surface choose its own region
 
@@ -2866,6 +2902,106 @@ bake level derived from it are both in `window.__CANOPY`, so the round's own
 report shows the coupling. **A value borrowed from another system should appear
 in your self-report, because that is the only place a reader can check that the
 borrowing worked.**
+
+## Playwright swallows exceptions thrown by init scripts, so a probe dies halfway and reports zeros
+
+`document.documentElement` **is null inside `page.addInitScript`**. Measured, not
+inferred: `readyState` reads `"loading"` and `documentElement` reads `NULL`.
+
+So a probe written in this obvious order silently loses its second half:
+
+```js
+window.__LOAD = { t0: performance.now(), marks: {}, frames: [] };   // survives
+window.addEventListener("scene-ready", ...);                        // survives
+new MutationObserver(fn).observe(document.documentElement, {...});   // THROWS
+let last = performance.now();                                        // never runs
+requestAnimationFrame(tick);                                         // never runs
+```
+
+`observe(null)` throws `TypeError: parameter 1 is not of type 'Node'`, and
+**Playwright swallows it** — nothing reaches `pageerror`, nothing is logged, the
+run continues to completion and exits 0.
+
+Eight consecutive loads were measured this way. The scene rendered 235 frames per
+load; the probe reported an empty frame array every time.
+
+### Why it read as a working instrument rather than a broken one
+
+Everything established *before* the throwing line survived, and those were the
+parts that looked like proof of life. `window.__LOAD` was readable with plausible
+fields. The `scene-ready` mark was not just present but **correct**, at 185.9 s
+cold and 18.8 s warm, because a listener added to `window` needs no document.
+
+Then the derived figures laundered the absence into numbers:
+
+- `Math.max(...[])` is `-Infinity`, printed as `-Infinity ms` and easy to skim
+  past as a formatting quirk.
+- An unset mark divided by 1000 and `.toFixed(1)` prints **`0.0 s`** — a
+  measurement of nothing wearing the units of the best possible result.
+- "Walkable: never" was reported for every condition, which reads as a finding
+  about the scene rather than as an instrument that took no samples.
+
+### The diagnosis came from the ordering, not from the values
+
+Three instruments, two dead and one alive, and **the boundary between them was
+exactly the line that threw**. Nothing else explains a correct `scene-ready` mark
+sitting beside an empty frame array. When a script can die halfway, the set of
+things that still work localises the death to a statement.
+
+### What to do instead
+
+Inject after the navigation commits — `page.goto(url, { waitUntil: "commit" })`
+then `page.evaluate(recorder)`. The document exists, an exception surfaces as a
+rejected `evaluate` in Node, and `performance.now()` still measures from the
+document's time origin so no precision is lost.
+
+Then guard on **liveness rather than value**: carry the sample count through, and
+return `null` for every derived figure when it is zero. `null` prints as an em
+dash; zero prints as good news. Note the asymmetry that makes this worth the
+trouble — a broken instrument and a fast scene produce the same output, and only
+one of them is worth reporting.
+
+Corollary, from the same session: the very next version of this file failed with
+`ReferenceError: PROBE is not defined` and stopped in four seconds. **Identical
+class of mistake — a reference to something that is not there — and it was
+instantly loud, because it happened in Node instead of inside an init script.**
+The mistake was not the problem. The place it was allowed to happen was.
+
+## A check that validates the wrong layer: three independent witnesses in one night
+
+Three agents, three unrelated systems, one shape. In each case a check existed,
+ran, passed, and was inspecting something one level away from the thing it was
+believed to be inspecting.
+
+1. **A pair assertion that could not fail.** It compared a quantity against
+   itself rather than against its partner, so it validated arithmetic rather than
+   agreement.
+2. **Vegetation compared flag echoes.** The assertion read back the *setting it
+   had just written* rather than any consequence of it, so it proved the
+   configuration mechanism worked and said nothing about the geometry.
+3. **A `--port N` default that resolved to `NaN`.** Written as
+   `argv[argv.indexOf("--port") + 1]`, which for an absent flag is `argv[-1 + 1]`
+   — the node executable's path. `node --check` passed, the syntax was fine, the
+   override path worked, and **the default path, the one nobody passes a flag
+   for, was the broken one.** Caught only by printing the resolved value.
+
+### What the three have in common
+
+Each check was one level too shallow. Syntax instead of value; the setting
+instead of its effect; a quantity instead of a relationship. And each is
+*persuasive at the layer it does test* — the syntax really is valid, the flag
+really was set, the arithmetic really does hold — which is why all three passed
+review by the person who wrote them.
+
+The practical rule: **assert on the thing downstream of the mechanism you are
+worried about.** Not that the flag was set, but that behaviour changed. Not that
+the file parses, but that the value came out right. Not that a number equals
+itself, but that two numbers that must agree do. If a check would still pass with
+the feature ripped out, it is testing the wrong layer.
+
+The default-argument case has a corollary worth its own sentence: **the path with
+no flag on it is a path, and it is the one that runs in production.** Overrides
+get tested because you type them; defaults get tested because someone thought to.
 
 ## A rule written down is not a check, and the part you add next is not covered by it
 
@@ -6183,6 +6319,84 @@ free.
    first — it is younger, it has been run fewer times, and nobody has ever
    looked at its output before.
 
+## Every harness here measured a warm load, and I deduced the exact opposite from the same mechanism
+
+Perf found that the scene's **first** load takes 279.1 s, or crashes the tab,
+against a steady 21.7-25.4 s on repeats — **12.0x**, reproduced across four
+independent sequences. The gap is not the interesting part. The interesting part
+is that this project had been measuring load time all night and could not have
+observed it, and that when I worked out why, I got the sign backwards.
+
+Every harness in `tools/` opens its page the same way:
+
+```js
+const browser = await chromium.launch(launchOptions());
+const context = await browser.newContext();   // <- deliberately incognito
+```
+
+I reasoned: `newContext()` is a fresh throwaway profile, so every load these
+harnesses ever timed was **cold**, and the warm case was inexpressible. The
+mechanism I cited was the **GPU program cache**, the store where Chrome keeps
+shaders already compiled to driver binaries.
+
+That mechanism was the right one and it refutes my conclusion. **The GPU program
+cache lives at the browser-process and GPU-process level, not the context level.**
+`newContext()` clears cookies and the HTTP cache; it does not clear compiled
+shaders. So contexts 2..N in a process inherit a warm one. And `stress.mjs` opens
+a throwaway page purely to assert the GPU *before* the page it measures:
+
+```js
+const gpuPage = await context.newPage();
+await gpuPage.goto(base, ...);            // <- loads the whole app
+await assertHardwareGpu(gpuPage, ...);
+await gpuPage.close();                     // measured load is now the SECOND
+```
+
+So it is not that every measurement was cold. **Every measurement was warm** —
+either the harness pre-warmed itself, or it was timing a repeat.
+
+### The datum that settled it was already in my own report
+
+A steady 21-25 s across repeats **cannot happen if every load is cold**, because
+cold loads are the 279 s ones. I quoted both numbers in the same paragraph as the
+claim they contradict. The tiebreaker required no new measurement, no new tool and
+no privileged information: only reading the two figures I had already written down
+as though they had to be consistent with each other.
+
+That is the part worth remembering. I had a mechanism I could argue for
+persuasively, and an arithmetic check sitting in the adjacent sentence, and I
+shipped the argument. **A mechanism explains why a number could be what it is; it
+cannot establish what the number is.** When the two are in tension the number
+wins, and the check is usually cheaper than the argument was.
+
+### The general form survives, and is strengthened
+
+**An experiment that holds a variable fixed cannot discover that the variable
+matters, and test isolation is exactly such a variable held fixed.** The suite did
+hold it fixed. It held it at *warm*, which is worse than holding it at cold,
+because the user's experience is the cold path — so the number the whole suite
+converged on stably, repeatably, and correctly was the one number no user will
+ever see.
+
+Anything that depends on state accumulated across sessions — shader caches, HTTP
+caches, driver caches, warmed JITs, OS file caches — is invisible to a suite built
+this way, and invisible in the manner hardest to notice: not as a failure, but as
+a result that is stable, repeatable, and answering a slightly different question
+than the one asked. Note also that Perf's own harness had "first load" perfectly
+confounded with "the attempt that allocates a second WebGL2 context", and removing
+the confound made the effect *larger*, 3-10x to 12x. A confound can hide an effect
+as easily as manufacture one.
+
+Two practical notes:
+
+1. Asking the question needs `launchPersistentContext(dir, ...)` and a directory
+   that outlives the browser **process**, not merely the context. A profile that
+   dies with the process cannot tell you whether anything survives a restart —
+   which is the only form of the question the user cares about.
+2. When a measurement's spread is much larger than its precision, suspect a
+   hidden condition before averaging it away. A 12x range is not noise around a
+   mean; it is two populations.
+
 ## Ask what physical quantity your constant stands in for, and whether that quantity is a fraction of something
 
 *Second instance of the rule stated earlier in this file, in a second system, and
@@ -7926,3 +8140,2677 @@ default of a control arm is the thing it is controlling against.
 What caught it was an unrelated habit: the harness prints the active force tokens
 in its own stats line, so `"tforce":[]` appeared in a round that was supposed to
 have one. **Print the state a run is in, not the state it was asked for.**
+
+## 60. A protocol whose safeguards are prose has no safeguards
+
+A document was written specifying five conditions that void a measurement run,
+each with a numeric threshold, to be applied after a 25-minute run in a window
+where the whole project stops and waits. All five were **prose in a markdown
+file**: someone would have to remember them, find the relevant figure in a
+60-line report, and compare by eye.
+
+That is the fault this project has paid for most, one level up. **A void
+condition nobody evaluates is not a safeguard, it is a paragraph**, and the
+contended run it should have discarded gets argued about instead — at exactly the
+moment when nothing else is running to settle the argument with.
+
+Moving them into a pure function over the run record, printed **above** the
+numbers the verdict governs, found two defects immediately:
+
+- **Condition 3 was wrong as written, not merely unexecuted.** "Any card phase
+  with a minimum below the baseline mean" includes the baseline phase itself,
+  whose own minimum is below its own mean by construction. The gate would have
+  voided **every run ever taken**, which is the failure mode where a check gets
+  switched off within a day. It was caught by the deliberate *clean-run control*
+  in the test, not by any of the cases written to make gates fire.
+- **The report printed a fired condition as `ok` and then again as `VOID`**,
+  because the record of evaluated conditions naturally includes the violated
+  ones. Four `ok` lines above four `VOID` lines is a report a skimming reader
+  closes as a pass.
+
+One design point generalises past this file: **a condition whose inputs are
+missing must report `UNKNOWN`, not pass.** Collapsing "could not evaluate" into
+"did not fire" means a run with no VRAM sampling at all sails through every
+memory gate by having nothing to test — the purest form of "the check did not
+fail, it failed to run".
+
+And the rule the clean-run control encodes: **test that a gate stays silent, not
+only that it can shout.** Four cases proving conditions fire told me nothing
+about the one that always fired.
+
+## 61. The first measurement in a sequence is a different measurement
+
+A harness was built to load the scene five times and check the ready times agree
+within 2×. Rehearsing it produced, across three independent sequences:
+
+| Sequence | Load 1 | Load 2 | Load 3 |
+| --- | --- | --- | --- |
+| A | **218.7 s** | 20.8 s | 21.3 s |
+| B | **171.9 s, timed out** | 30.9 s | 21.9 s |
+| C | **hard `Page crashed`** | — | — |
+
+The criterion would have failed all three and blamed the harness or the host. But
+**three for three is not the shape of random contention**, and the honest reading
+is that the first load into a fresh process is measuring something the repeats
+are not: first-request cost, first GPU context, cold shader and file caches.
+
+The consequence is the part worth keeping. **The user's run is a first load.** The
+~21 s init figure quoted throughout this project is a *warm repeat*, and the
+number that describes what the user experiences had never been measured at all —
+it sits somewhere between 21 s and 219 s and nobody had noticed the distinction,
+because every harness loads once and every repeated harness reuses a process.
+
+So the criterion now scores load 1 separately and reports it prominently, rather
+than averaging it in or discarding it as an outlier. **A rule that treats the
+most decision-relevant sample as noise is worse than no rule**, and the giveaway
+was that the "outlier" was in the same position every time.
+
+## 57. "Passable" and "crossable" are different properties, and a widest path only answers the first
+
+A widest-path search maximises the tightest gap on the route. That makes it the
+right instrument for "can the player get there at all", and it made this shop
+pass: bottleneck 0.528 m at the doorway, +208 mm of margin, and a walked
+confirmation that completed 176 legs.
+
+It is the wrong instrument for "what would a player walk", and not by a little.
+**Maximising the bottleneck makes the search prefer a wide detour to a narrow
+shortcut — by construction it returns the longest acceptable route.** A detour
+ratio measured on it says more about the search than about the shop: it reported
+151 m walked for 37 m of straight line, which is a fact about max-min Dijkstra.
+
+A player walks the shortest route their body fits through. That is a plain
+shortest path on the same grid and the same clearance field, admitting only cells
+with clearance above the body radius. Running both, and reporting both, separates
+the two questions:
+
+| | widest path | constrained shortest |
+|---|---|---|
+| answers | is it passable, and where is the gate | is it crossable, and what does it cost |
+| bottleneck | 0.528 m — the doorway | **0.330 m — a 10 mm margin** |
+
+The second row is the one that mattered. The direct interior route existed the
+whole time and threaded gaps of 13 to 30 mm. **A gap can be admissible and
+unwalkable at the same time**: 0.70 m of gap for a 0.64 m body passes every
+threshold test and is a scrape, not a corridor, and a driven controller drifts
+into the jamb and jams. Report the margin on the direct route, not just the
+existence of a route.
+
+One asymmetry worth knowing when reading those margins: a 13 mm margin at a door
+*jamb* stalled the controller, and a 10 mm margin at an outside *corner* did not.
+A corner-cut has open space on both sides of the tight cell; a jamb has wall.
+
+## 58. A walk harness must not actuate scenery it passes, and must not search for a stance it can derive
+
+Three failures in one session, all of which produced reports that read as
+geometry defects in the shop:
+
+1. **It re-clicked the entry door.** The interaction is a toggle and the opener
+   had no memory, so on a route that lingered near the jamb it opened the door,
+   then shut it, then stalled against a door it had closed itself. The report read
+   `opened: entry-door at 1.52 m, at 0.10 m, at 0.22 m` — which is one opening and
+   two closings. It hid for a whole session because only a *direct* route passes
+   the doorway slowly enough to re-probe it.
+2. **It opened cooler doors it merely walked past.** Once the route was direct
+   enough to run along the cooler bank, "open anything named door within 2 m" left
+   two leaves standing across the aisle, and the grab then failed. That looked
+   exactly like an aisle-clearance defect.
+3. **It searched for a stance instead of deriving one.** Sidestep left and right
+   until the crosshair finds the bottle: it wandered five metres away, and each
+   attempt reported a different number while the invariant — the crosshair never
+   naming the bottle — held throughout. Case 53, for the third time.
+
+The rules that fall out:
+
+> **A harness may actuate only what stands in its way, and only once.** Anything
+> it toggles twice it has restored, and anything it toggles in passing it has
+> broken for the test that follows.
+
+> **If a stance can be computed from the geometry, compute it.** The stance here
+> is bracketed by two known faces and its centre is one line of arithmetic; the
+> search that replaced that line generated four plausible false defects.
+
+And the reason all three were expensive: **a harness fault and a scene fault
+present identically.** Both come back as "the player could not do the thing". The
+discriminator is whether the harness did something to the scene it would not have
+had to do — and that is visible in its own log, which is why the log has to name
+the object and the distance for every actuation.
+
+## 62. Suspecting your own instrument is right; concluding from the suspicion is not
+
+A finding had been escalated to the top of the project and a user-facing README
+had been rewritten around it: the first load of the scene costs 3-10x what later
+loads cost. Re-reading my own harness, I found a confound that fitted perfectly:
+
+    await page.goto(base, ...);
+    if (i === 1) {                              // attempt 1 only
+      gpu = await assertHardwareGpu(page, ...); // a SECOND WebGL2 context
+    }
+    await page.waitForFunction(() => __SCENE_READY, ...);
+
+The clock started before `goto`, so attempt 1 — and only attempt 1 — carried an
+extra WebGL2 context allocation inside its measured window, on a card at 6-8 GB
+of 8. Both sequences had it. **"First load" and "the attempt that does an extra
+thing" were perfectly confounded.** There was even a control already in the data:
+a different harness that loads once in a fresh browser and is always fast.
+
+Everything about that invited immediate retraction, and retracting on it would
+have been wrong. Removing the confound entirely — GPU check moved to a throwaway
+page, all attempts byte-identical — gave **279.1 s, then 25.4, 23.3, 21.7**. The
+effect was not merely intact, it was *larger* than before.
+
+The lesson is symmetric with the one about accepting a flattering finding. **A
+mechanism that explains your result is not evidence against your result**, in
+either direction. I had a plausible artefact, a matching confound in my own code,
+and a sibling harness that appeared to contradict me — three independent reasons
+to withdraw, and the measurement said no. The cost of testing it was one run; the
+cost of retracting a true user-facing finding would have been the deliverable.
+
+And the sibling harness that "contradicted" it turned out to be the second half
+of the explanation rather than a counterexample: **it loads the app in a
+throwaway GPU-check page before the measured page exists**, so its fast number
+was a warm load wearing the label of a cold one. A contradiction between two
+harnesses is a fact about the harnesses until someone reads both.
+
+## 63. "Every measurement was cold" and "every measurement was warm" are the same discovery pointed backwards
+
+Two agents independently noticed that load-time measurements in this project had
+never distinguished cold from warm. One concluded **every measurement was cold**,
+because `browser.newContext()` is incognito and gives an empty cache each time.
+The evidence said the opposite: repeats inside a sequence were a steady 21-25 s,
+which cannot happen if every load is cold.
+
+Both had hold of the same real defect and the direction resolves cleanly:
+`newContext()` clears the **HTTP** cache, but the **GPU program cache lives at the
+browser and GPU-process level, not the context level**, so contexts 2..N inherit a
+warm one. Add a harness that loads the app once in a pre-flight GPU-check page,
+and its measured load is the *second* load in that process.
+
+**So every published init figure here was warm** — the 25.2 s load, the 8.3%
+shader-compilation share, the per-system table — and the number describing what a
+user experiences, 172-279 s, had never been measured by anything.
+
+Two things worth carrying:
+
+- **Test isolation is a variable, and an experiment that holds it fixed cannot
+  discover that it matters.** Every harness chose incognito for good reasons and
+  the choice was invisible because it was unanimous.
+- **When two people derive opposite claims from the same observation, neither
+  should be adopted until the mechanism is named.** "All cold" and "all warm"
+  both explain "nobody ever compared", and only one of them survives contact with
+  the repeat times that were sitting in both agents' logs.
+
+The related deduction came free from data already collected: the penalty recurred
+in **every fresh browser process** minutes apart on one machine, so the warm state
+does not survive a process. That rules out the driver's machine-level cache and
+points at Chrome's per-profile one — which matters, because a user with a
+persistent profile pays it once and a harness with a throwaway profile pays it
+always.
+
+## 63. Albedo detail on a surface in shadow is bounded by the light, not by the paint
+
+Three rounds went into making the forecourt read as a working forecourt: tyre
+scrub at the stances, swing-in ribbons, a kerb grime band. All of it is in the
+map, all of it reaches pixels — the forced-off control moved 71% of near-field
+pixels with a mean of 3.9 levels — and none of it is visible.
+
+The reason is arithmetic that should have been done first:
+
+| | tonal spread (p90−p10) | % of 0–255 |
+|---|---|---|
+| forecourt under the canopy | 18.6 | 7.3% |
+| sunlit ground, same frame | 132.7 | 52.0% |
+
+The canopy deck is 4.72 m up and the sun is at 11°, so its shadow reaches
+4.72/tan(11°) = **24.3 m** past the deck edge, ending at z ≈ 51 against a
+forecourt that ends at z = 27.2. **The entire forecourt is in shadow, and so is
+the lot behind it.** Its median luminance is 41. A 30% albedo mark — which is a
+strong mark, about what fresh rubber does to concrete — moves such a surface by
+12 levels, or 4.8% of the range, in a frame whose highlights are at 255.
+
+So the general result: **the visible contrast of an albedo feature is the product
+of its albedo ratio and the illumination on it, and in shadow the second term is
+the one that dominates.** Painting harder is multiplying the term that is already
+fine. This is the same shape as the slope-versus-solar-tangent case — compute the
+condition the feature has to survive before choosing an amplitude — and it has the
+same corollary: the number to check is cheap and nobody checks it.
+
+Practical rule: **before authoring surface detail, measure the tonal spread of the
+region it is going onto.** If that spread is under about 10% of range, no albedo
+work will read there and the lever is the light, which usually belongs to someone
+else. Ask for it rather than compensating, because compensating means authoring
+absurd albedo values that will look wrong the moment the light is fixed.
+
+### The two wrong turns, both instructive
+
+**Reusing a helper whose side effect dominated.** The swing-in ribbons were first
+drawn with the existing `drivenPath`, which paints a dusty sun-bleached strip at
+1.22x albedo across `gauge + 1.5` metres. That is correct for an open lane, where
+the ground between the wheel tracks really is paler. Sixteen of them layered over
+the stances flooded the area with *light* wash: measured, stance oil tint fell
+from 63 to 50 and 5th-percentile albedo rose from 88 to 94, so the first version
+of a change made to add contrast **removed** it. A helper's incidental behaviour
+is load-bearing when you call it sixteen times in one place.
+
+**Measuring "it does not read" from a view that could not contain it.** The first
+two walking poses were authored to judge the ground plane and its wetness, so both
+look across open forecourt. The scrub is at the stances, x within ±4 and z of
+21.25 and 25.15 — **neither pose had a stance in frame.** One round was spent
+concluding the marks were weak from frames that could not have shown them. Same
+defect as the crop whose variance was all broad shading: an instrument pointed
+away from the signal returns a confident null.
+
+### And the input check that saved a round
+
+Before any of this, the premise was "the forecourt has no grime, add some". A
+byte-level scan of the overlay map (`tools/overlayscan.mjs`, written for this)
+found the forecourt is already **the dirtiest surface on the site** — oil-tint
+channel averaging 33 against the asphalt lot's 11, and 100% coverage at the
+stances. The forecourt was never undirtied, and painting more of the same would
+have changed nothing. **Check what the input already says before adding to it**,
+which is the same lesson as the empty-uniforms loop from an hour earlier, and the
+second time in one session that reading the input beat auditing the consumer.
+
+## 64. A warning reported as a failure is the false positive that gets the gate switched off
+
+`shoot1` aborted a round on this console line:
+
+    THREE.WebGLProgram: Program Info Log: (210,81-129): warning X4122: sum of
+    0.996094 and -2.98545e-017 cannot be represented accurately in double precision
+
+That is ANGLE's HLSL backend commenting on ordinary constant folding. The frame
+had already been captured correctly. The detector matched `program info log`,
+which is the envelope *every* shader diagnostic arrives in, benign ones included.
+
+Shader compile and link errors must stay fatal — that rule has earned its place
+here. The defect is the classification, not the severity: a gate that fails a
+healthy round teaches its operator to pass `--force` and stop reading it, which
+costs more than the gate ever saved. Fixed by excluding `warning X\d+` unless the
+same line also says `error`, with a four-case self-test including a line carrying
+both, since a warning followed by a real error must stay fatal.
+
+The benign ones are now printed as notes rather than dropped. **A diagnostic
+nobody ever prints is where a real one hides in a familiar shape.**
+
+## 65. One scalar over several terms attributes the whole drop to whichever term you were thinking about
+
+`?lforce=nofluoro` is named after the fluorescents. It took `interior_cold` from
+129.9 to 37.7 mean luma, and I reported that the lamps supply 71% of the interior
+frame. They supply 39%.
+
+The flag zeroed one `gain` scalar that four independent things multiplied by: the
+ceiling fluorescents, the cooler tubes, the storefront daylight rect, and the two
+point lights standing in for sun bounce off the floor. Splitting it into separate
+levers and re-measuring in one bundle gave the real ranking, which was close to
+the reverse of my first two guesses:
+
+| term | luma | share |
+| --- | --- | --- |
+| door bounce + jamb glow | 44.8 | 49% |
+| all lamps together | 36.1 | 39% |
+| storefront daylight rect | 11.1 | 12% |
+
+I then guessed wrong a *second* time in the same hour, on the same evidence: with
+the lamps ruled out I attributed the room to the storefront rect, because a
+wall-sized area light is the conspicuous thing in that file. The rect is 12%.
+
+**A flag's name is a hypothesis and its blast radius is a fact, and only one of
+them is in the code.** The rule that follows is mechanical rather than a matter of
+care: before quoting a share, count how many terms the flag multiplies. If it is
+more than one, it can bound the total and cannot attribute any part of it. Both my
+wrong attributions were arithmetically consistent with the measurement I had —
+that is what made them comfortable, and neither survived contact with a lever that
+moved one term.
+
+Related to **"A bug report names a cause, and the name is not evidence"**, where
+the misleading name was on a *report*. This is the instrument-side version, and it
+is worse, because a report is obviously someone's opinion while a measured 92-luma
+drop feels like a fact.
+The 92 was a fact. The attribution was decoration.
+
+## 66. Byte-identical variants are a build failure before they are a null result
+
+A four-point sweep of a new parameter produced four byte-identical frames. I read
+that as "the parameter never reached the lights" and started looking for the
+plumbing mistake.
+
+The plumbing was fine. `num` was not defined in that scope, the whole interior
+lighting threw during construction, and every arm rendered a room with no interior
+lights at all — identical because they were all equally broken. The harness had
+already said so, in the line directly above the pixel numbers I was reading:
+
+    exit=1
+    [shoot4] shutting down: __SYSTEM_ERRORS -> num is not defined;
+             interior lighting was not built
+
+`npx tsc --noEmit` had also printed `error TS2304: Cannot find name 'num'` before
+the round started. I had run it, in the same command, and piped it somewhere I did
+not read.
+
+Two habits, both cheap:
+
+- **Read the exit code before the pixels.** A non-zero exit means the numbers
+  below it describe something other than what you asked for. This project's whole
+  thesis is silent failure; this one was screaming.
+- **An edit script must verify its own match.** Mine ended with
+  `print("wired")` on an unconditional line after a `str.replace` that had not
+  matched. Every later edit in this session ends with a `count != 1` check that
+  raises, and prints `EDITS_APPLIED_OK` only on the far side of it. A control must
+  prove it was applied — including the controls that are three lines of Python.
+
+A third thing worth naming, because it wasted a paragraph of confident writing.
+The X4122 shader warning of **"A warning reported as a failure is the false
+positive that gets the gate switched off"** appeared in none of my logs before
+05:01 and ten times at 05:09, so I attributed it to the spot shadow I had just
+added. It is
+not mine: the count was two per capture across all five arms *including the arm
+with the spot disabled*, and a sibling had landed a shader change in the eight
+minutes between my two rounds. **A novelty test across two rounds in a shared tree
+measures the tree, not your change** — the same finding Pumps reached for pixels,
+which applies just as well to console output.
+
+## 64. Every instrument here samples after readiness, which is why init was a black box
+
+An audit of my own harnesses, prompted by a sibling finding that `page.screenshot`
+**times out at 15 s during a single unbroken ~12 s main-thread block in init**:
+
+| Harness | waits for ready at | first sample at |
+| --- | --- | --- |
+| `perf.mjs` | line 222 | line 563 |
+| `shadow-type-ab.mjs` | line 132 | line 171 |
+| `program-audit.mjs` | line 413 | line 466 |
+| `stress.mjs` | before the route | after ready |
+
+**Every one samples strictly after `__SCENE_READY`.** The narrow good news is that
+none of them can hit that timeout. The real content is the same fact stated
+honestly: **init has been a black box with a single number written on it for the
+entire project**, which is why neither the 12 s stall nor a 10x cold-load penalty
+was ever visible from here.
+
+Per-system `init()` timings do not fix this. A wall-clock delta around a call
+reports how long a system took and nothing about the *shape* of what it did — **12 s
+of unbroken blocking and 12 s of cooperative work are the same number to it**, and
+only one of them makes a progress bar freeze and a screenshot time out.
+
+The pattern that works was already in this codebase without being recognised as a
+pattern: **sample from the harness process, not from the page.** The `nvidia-smi`
+VRAM sampler polls from Node and is immune to main-thread state by construction;
+CDP `Page.startScreencast` and CDP metrics have the same property, which is how a
+sibling recorded 771 compositor frames across a 283.8 s load with a longest gap of
+5.49 s. Anything routed through `page.evaluate` or `page.screenshot` queues behind
+the very stall you are trying to measure — **the instrument is blind exactly when
+the interesting thing happens**, and it reports that blindness as a failure of
+itself rather than as a property of the program.
+
+## 65. A marker element with no visible purpose is the most dangerous kind of dependency
+
+`index.html` carries `<div id="loading"></div>`: zero size, empty, no text, no
+styling beyond being invisible. It looks like debris.
+
+It has **six** dependents, and every one of them fails quietly if it goes:
+`Game.ts` removes it on rendered frame 2; one harness times **first frame** by
+watching for that removal with a `MutationObserver`, so if the element never
+exists the observer never fires and the harness reports no first-frame time
+*while otherwise succeeding*; another asserts its presence during boot; and three
+more print its `textContent` as their diagnostic when a load fails.
+
+Those last three are already broken and nobody noticed. The element is now empty
+and **nothing writes text into it any more**, so their `#loading text:` diagnostic
+prints an empty string — in precisely the failure case it was added for. The
+status text moved to a different overlay when the loading screen was rewritten,
+and three harnesses kept reading the old address and getting a valid, meaningless
+answer.
+
+Two rules. **An element that exists only to be observed must say so at the
+element**, not in the report of whoever added the observer — a comment pointing at
+a CSS rule explains why it is invisible, not why it may not be deleted. And
+**reading a property that is now always empty returns success**: `textContent` on
+an empty div is `""`, not `null`, so no probe, no test and no type checker can
+distinguish "the diagnostic is blank" from "there was nothing wrong".
+
+## 66. A failing verdict survives contention; a passing one does not
+
+Deciding whether to spend a scarce quiet window on the cold-load gate produced a
+rule worth keeping, because the intuitive answer is wrong in a specific way.
+
+The cold-load effect is **immune to contention** and has been shown so five times:
+279.1 s and 283.8 s from two different harnesses with two different purposes,
+agreeing to 1.7%, both on busy hosts. So a contended run measures the effect
+fine, and it is tempting to conclude the measurement does not need a quiet host.
+
+That conflates the effect with the verdict. **Contention only ever inflates**, so
+for a gate that fails above 180 s:
+
+- A contended cold load of 279 s, discounted by the largest contention penalty
+  ever measured here (40% on a warm load), is still ≥ 199 s. **The FAIL is robust
+  — the margin is 99 s and contention cannot account for it.**
+- But a *future* contended run at 70 s cannot be distinguished from a quiet 50 s.
+  **The PASS is not available at any level of contention.**
+
+So the phase a measurement belongs in depends on **which direction the answer is
+expected to point**, not on how robust the underlying effect is. Confirming a
+known failure with a magnitude is contention-tolerant work. Verifying that a fix
+crossed a threshold is not, and must be re-run quiet even though it is the same
+command against the same criteria.
+
+The corollary is the part that would have been missed: **a crash during a
+contended run is not attributable.** Cold loads have crashed the page before under
+contention, so a crash in this phase must be reported as uninformative rather than
+as the strongest possible version of the finding — which is exactly what it will
+look like at the time.
+
+## 67. `addEventListener` with an undefined listener succeeds and does nothing
+
+Caught mid-edit in a sibling's file while checking a precondition, and it is this
+project's signature failure in one line:
+
+```js
+window.addEventListener("keydown", this.onKeyDown);   // onKeyDown does not exist yet
+```
+
+`tsc` reports it (`Property 'onKeyDown' does not exist`), but nothing at runtime
+does. The DOM spec types the callback as a nullable `EventListener?`, so
+`undefined` coerces to null and the call **returns early without throwing**. The
+listener is silently never registered.
+
+The consequences are ordered from harmless to expensive:
+
+- Init does **not** throw, so `__SCENE_READY` still fires and the scene still
+  loads. A load-time measurement over this build is valid.
+- But the key it was registering is dead. **The feature is absent and the program
+  reports success**, so any harness driving that key sees no effect and attributes
+  it to the interaction being broken, or to its own input dispatch — never to a
+  listener that was never attached.
+- A build step that does not typecheck (Vite, esbuild, oxc all strip types without
+  checking them) will ship this happily. **`tsc` is the only thing in the pipeline
+  that can see it**, which is why "leave the tree typechecking" is a runtime
+  correctness requirement here and not a tidiness one.
+
+The general form, third instance tonight after the empty `textContent` and the
+zero-dimension PNG: **an API that accepts absence as a valid argument cannot
+report absence as an error.**
+
+## 68. A shadow's reach is one number and its direction is two, and a reach applied to the wrong axis lands somewhere real-looking and wrong
+
+Terrain reported, with arithmetic, that the canopy deck shadows the entire
+forecourt and that this is why a full cycle of tyre scrub, swing-in ribbons and
+kerb grime delivered a contrast delta of exactly zero. The deck is 4.72 m up at
+a sun elevation taken from `site.SUN`, so the reach came out as
+4.72 / tan(11 deg) = 24.3 m. The conclusion drawn from it — "ending at z = 51,
+and the forecourt ends at 27.2, so the entire forecourt is inside the canopy's
+shadow" — placed all of that along +Z.
+
+Two independent errors, and they are worth separating because only one of them is
+the interesting one.
+
+**The elevation was stale.** `site.SUN.elevation` held 11 degrees while
+`LightingSystem` shipped 6.2 privately, and nothing in `src` imported the shared
+field, so the renderer never disagreed with it. Corrected, the reach is
+**43.5 m**, not 24.3. See the unused-constant entry below; the shared field has
+since been reconciled to 6.2 and this tooling now cross-checks it.
+
+**The direction was applied to the wrong axis, and that was the load-bearing
+mistake.** `SUN.azimuth` is `Math.PI * 1.13`, or 203.4 degrees, so the anti-sun
+direction in XZ is (0.918, 0.397) and the displacement is **39.9 m in X and
+17.3 m in Z**. The deck's shadow lands at x 33.3..46.5, z 30.4..44.0. **The
+forecourt ends at x 11.6, so the deck's shadow misses it by a wide margin** — and
+note that the stale elevation made the error *look smaller* than it was. Fixing
+only the elevation would not have found this; fixing only the axis would have
+given the right answer for the wrong reach.
+
+Ray casting every forecourt sample toward the real sun vector against the deck,
+the fascia, the four columns and the store building:
+
+```
+  canopy deck + fascia    shadows NOTHING on the forecourt
+  canopy column 1..4      2.20% .. 4.03% each, 11.0% together
+  store building          shadows NOTHING on the forecourt
+```
+
+The forecourt is **89% in direct sun**. Two systems then spent effort on a
+shading problem that did not exist, and a third was asked to raise a light level
+to fix it.
+
+Why it survived review: a reach is a scalar and reads like a complete answer, so
+`24.3 m` invites `z + 24.3` without the azimuth ever being consulted. Both the
+number and the region were real, which is what made the composite credible.
+Note also that a 6.2 degree sun under a 4.72 m deck penetrates **43.5 m**
+horizontally, against a deck only 13.2 m across — **so a low sun lights the ground
+under a canopy right through to the far side and out the other end, more than
+three times over**, which is the opposite of the intuition that a canopy shades
+what is beneath it.
+
+### The coverage figure did not move when the elevation was corrected, and that is a result rather than a stale read
+
+Re-running at 6.2 degrees returned column coverage of **10.97%, identical to the
+figure computed at 11**. The inputs had plainly changed — `sunDirection` from
+(-0.9009, 0.1908, -0.3899) to (-0.9124, 0.1080, -0.3948), metres of shadow per
+metre of height from 5.14 to 9.21 — so the invariance needed explaining rather
+than accepting. Sweeping the elevation with an override:
+
+```
+   3 deg  10.97%      20 deg  22.75%
+   4 deg  10.97%      35 deg  42.03%
+ 6.2 deg  10.97%      50 deg  49.91%
+  11 deg  10.97%      65 deg  51.41%
+```
+
+Exactly constant to 11 degrees, then rising. The mechanism: the columns span the
+full clear height, so a ground point is shadowed if its sightline crosses a
+column footprint *while still below the soffit*, and a ray reaches soffit height
+only after 4.76/tan(el) — 43.8 m at 6.2 degrees, 24.5 m at 11. Both exceed the
+furthest any forecourt sample sits from a column, so the test degenerates to a
+purely two-dimensional question about the footprint, and **the answer cannot
+depend on elevation at all** inside that band. Above about 14 degrees the deck's
+own shadow begins landing on the forecourt, which is what the rise is: at 20
+degrees the deck contributes 16.41% where it had contributed nothing.
+
+Two things follow. The correction from 11 to 6.2 degrees sits entirely inside the
+invariant band, so **every forecourt number reported at 11 degrees stands
+unchanged** — the streaks are not longer or differently placed within the
+forecourt, only outside it. And an invariance across a changed input deserves one
+sweep before it is either trusted or disbelieved: had the probe been reading a
+cached value, the sweep would have shown a flat line all the way to 65 degrees
+rather than a band whose boundary has a derivable cause.
+
+The check is cheap and there was no excuse for not running it: cast the ray
+rather than reasoning about the offset. `tools/probe-shadowsource.mjs` runs
+in under a second with no GPU, and names the occluder per sample. **Anything
+attributing a region's darkness to a specific occluder should identify that
+occluder by ray test, not by displacement arithmetic.** Cross-reference case 63,
+which is correct as written but whose premise — that the surface was in shadow —
+did not hold for the case that produced it.
+
+## 69. Occlusion and the bounce off the occluder are anti-correlated by construction, so a bright ceiling cannot give the floor beneath it tonal structure
+
+Having established the forecourt was flat, the request was to raise Canopy's
+"soffit bounce". Two mechanisms were in the way.
+
+First, **the named lever does not connect at all.** The soffit's brightness comes
+from a `lightMap` and an `emissiveMap`, and both are receiver-side terms:
+`WebGLRenderer` has no light transport between surfaces, so `setLampBounce(2)`
+brightens the soffit's own pixels and moves the ground by exactly zero levels.
+Turning it and re-measuring would have produced a null result indistinguishable
+from a broken control — the failure mode of case 42, arrived at from the other
+end.
+
+So the real second bounce was built instead: integrate the soffit's baked
+exitance over the deck with the parallel-surface form factor `h^2/(pi r^4) dA`,
+and occlude the ambient by the exact solid angle of the deck. Both purely
+geometric, no level baked in. Individually they are strong — the bounce field
+ranges 10.7x across the forecourt.
+
+**Their sum is flatter than what it was meant to fix.** Combined spread across
+the deck footprint: **3.4%, against the 7.3% Terrain measured.** The reason is
+structural, not a tuning error: sky occlusion is deepest exactly where the view
+of the soffit is best, and vice versa. At the deck centre sky visibility is 0.535
+and soffit bounce is 0.996; at the drip line they are 0.707 and 0.734. A ceiling
+with albedo `a` returns `a` times what it intercepts, so the two terms cancel to
+within `(1 - a)`, and the soffit's albedo is 0.82.
+
+Which is why canopies are painted white, and why a forecourt under one is not
+gloomy. The near-cancellation is the physics.
+
+Two things worth keeping from it:
+
+- **The free coefficient between two fields is where the error lives.** The first
+  version published `skyVisible` and `soffitBounce` separately and left the
+  consumer to weight them; the weight used while testing was an arbitrary 0.42,
+  which can and did produce a deck that *brightens* the ground it shades. The
+  fix was to publish one combined `ambientScale = skyVisible + albedo * (1 -
+  skyVisible) * shape`, which is bounded above by 1 by construction and cannot be
+  mis-weighted because there is nothing left to weight.
+- **Measure the amplitude a published field reaches at the consumer's geometry
+  and put that number in the service.** This one is 0.883 at the drip line, 0.915
+  mid-bay, 0.942 on the apron: 6.3% point to point and 0.5% median to median. It
+  is published with those figures in its own doc comment and an explicit note not
+  to spend a round on it, because the alternative is a consumer discovering the
+  amplitude after integrating it. Same principle as a borrowed value being
+  visible in the borrower's report, pointed outward.
+
+## 70. A region lit mainly by a constant is flat at every brightness, so the lever is structure and not level
+
+The forecourt measures median luminance 41 with a tonal spread of 7.3% of range,
+and 89% of it is in direct sun. Decomposing the terms actually reaching it at the
+current levels:
+
+```
+  direct   sun 4.4 x sin(6.2 deg) = 0.108  ->  0.475
+  ambient  env 2.4, one constant colour    ->  2.400
+  ambient : direct = 5.05 : 1 on horizontal ground
+```
+
+Two consequences. The region is dark because a horizontal surface at 6.2 degrees
+of elevation collects **10.8%** of the beam — dawn, working correctly, and not
+something an occluder is doing to it. And it is *flat* because the term that
+dominates it by 5:1 is spatially constant. Measured over the open apron
+inside the forecourt, tonal spread from the lighting terms alone is **0.0%**;
+under the deck it is 25.9%, and every bit of that comes from the four column
+shadow streaks, which are the only structure present in that region.
+
+> A spatially constant term cannot produce spatial variation, at any magnitude.
+> Raising it makes the region lighter and equally flat.
+
+This is the complement of case 63 rather than a restatement: that entry says
+albedo detail in shadow is bounded by the light, and gives the level. This one
+says that on a surface whose dominant term is *uniform*, no amount of level
+restores structure either, and the only levers are terms that vary — occlusion,
+and shadow.
+
+The same argument was already written down in this system's own file, for the
+soffit, months of agent-hours earlier in the night: *"there is no ambient
+occlusion anywhere in this scene and the environment's lower hemisphere is a
+single constant colour, so a flat soffit lit only by that hemisphere comes out as
+one value across 178 square metres."* The surface facing it, 4.7 m below, has the
+identical problem for the identical reason, and neither system connected the two
+until the ratio was written out. **A diagnosis recorded for one surface does not
+propagate to the surface facing it.** Fourth instance tonight of a rule covering
+the case that produced it and not the next one.
+
+## 68. A system that rasterises at construction cannot be measured, and the workaround is always an empty collection
+
+`BuildingSystem.init` read `location.search`, then rasterised every texture it
+owns through `document.createElement("canvas")`. **`location` is shimmable; a
+canvas is not.** So the system could not be constructed under Node at all, and
+every CPU-side harness that registered it died on the second line of its own
+setup.
+
+The interesting part is not that it failed. It is **what the failure forced
+downstream**. A sibling harness needed this building's collision rects, could
+not construct the system to ask for them, and so added an opt-in path that
+supplied the published footprint with an **empty blocker list**. That harness
+then over-populated the lot interior for an unknown number of runs, and only its
+results outside the footprint meant anything.
+
+An empty collection is the worst possible stand-in, because **it is a valid
+answer to the question that was asked**. `blockers.length === 0` is exactly what
+a building with nothing in it returns. Nothing throws, nothing warns, and the
+consumer's own arithmetic runs to completion on it. Compare the alternative
+failure — `require("building.blockers")` throwing — which is unmissable and lands
+in the tool that had no business needing them.
+
+Two rules from it.
+
+**Split what describes *where things are* from what describes *how they look*.**
+The plan of this building is pure arithmetic over about thirty dimensions; the
+rasteriser is a separate concern that happened to sit in the same `init`. Once
+the plan lives in its own module (`gen/buildingLayout.ts`, free of `document`,
+`window`, `location` and THREE materials) the footprint, the blockers, the
+bounds, the collision function and the floor height all come for free under Node,
+because none of them ever needed a pixel. There is now no second copy: the system
+imports that module rather than owning its own literals, so the two cannot
+disagree — which is the same rule that the impulse island's geometry-versus-
+collision pair nearly broke.
+
+**Publish nothing you would have to fake.** The layout-only path deliberately
+does *not* provide the door lists, the light slots, the grabbables or the
+interior material set. Each of those would have to be an empty array, and a
+consumer cannot distinguish "no cooler doors in this build" from "no cooler doors
+because there is no canvas". They are left absent so `require` throws. A
+`building.headless` marker is published instead, so a tool can *assert* which
+path it took rather than infer it from what is missing — inferring a mode from
+absent data is how the empty blocker list survived in the first place.
+
+The general form: **when a system cannot be constructed in an environment,
+somebody will construct a fake one, and the fake will be shaped like a correct
+answer.** The cost of not being headless is not paid by the system. It is paid,
+silently, by whoever needed it.
+
+## 69. The frames a defect was measured in are part of the report, and an mp4 cannot stand in for them
+
+A routed finding: **721 pixels at exactly (255,255,255)** in frames 11 and 12 of
+the film, clustered at x 480–630 in the lower third, attributed to the store
+front. Neutral, all three channels railed, and therefore unrecoverable by any
+grading — a real defect described precisely, with the right instrument, and with
+a correct inference about mechanism (a neutral clip is something white, emissive
+or specular; a warm sunlit surface clips red first and shows colour on the way
+up).
+
+It could not be reproduced, and the reason is worth more than the finding.
+
+`shots/film/frames/` **was empty** by the time it was read. The only surviving
+artefacts were the encoded mp4 and a handful of PNG stills. So the frames were
+re-extracted from the mp4 — and **frames 11 and 12 contain zero pixels at exactly
+(255,255,255)**. Not because the defect was fixed: because H.264 with 4:2:0
+chroma subsampling and lossy quantisation does not preserve exact channel values.
+The single measurement the finding rests on is **the one quantity an encode
+destroys**.
+
+Location does survive an encode, and that is what settled it. In those frames the
+region x 470–640 in the lower third has a **maximum luma of 76**. Compression
+moves a value by a few codes, not from 255 to 76 across a 170 × 300 region, and
+the frame turns out to be under the canopy with the building not in shot at all.
+So the coordinates cannot describe the store front *in this file*, and the frames
+they do describe no longer exist.
+
+Three rules.
+
+**Keep the frames that carry the claim, or cite a frame that can be regenerated
+deterministically.** A frame index into a lossy encode is not a citation; it is a
+pointer into a different image than the one measured.
+
+**Match the instrument's precision to the medium's.** "Exactly 255" is a
+meaningful test on a PNG and a meaningless one on an mp4. The same probe run on
+the two media gives 721 and 0, and neither number is wrong.
+
+**Use the quantity that survives to check the one that does not.** The encode
+could not confirm the clip, but it could refute the location, and refuting the
+location was enough to stop a fix being aimed at the wrong object. When the
+primary measurement is unavailable, look for a secondary one that the failure
+mode cannot have affected.
+
+What replaced it was a measurement on the lossless stills that *were* on disk:
+521 px and 197 px fully clipped in the two door-approach frames, every one of
+them on a single material, localised by clustering the clipped pixels and reading
+their bounding boxes rather than their count. **721 was one number that could have
+been one lamp or forty specks**; the cluster shapes said mullion and push bar, and
+the material followed from that in one grep.
+
+## 71. A shadow is displaced, not extended, and getting that wrong invents an occluder that is not there
+
+I told two systems the forecourt was in the canopy deck's shadow. It is not, and
+the error was one line of geometry.
+
+What I computed was the shadow's **reach**: a 4.72 m deck at a low sun throws a
+shadow 24 m long. What I then assumed was that the shadow covered the deck's own
+footprint and continued 24 m past its edge — that a roof shades the ground under
+it and a strip beyond. That is what a roof does at noon. At a low sun it is
+wrong, and the correct statement is a translation rather than a dilation:
+
+    shadow region = caster footprint + h * (toward-sun XZ) / sin(elevation)
+
+For this deck that is the footprint moved 43.5 m, so the shadow lands out in the
+lot at x 10.7..23.9, z 53.0..66.6 and **0.0% of the forecourt is inside it.**
+The sun comes in *under* the deck edge and the ground beneath the canopy is
+directly lit. The lower the sun, the further the shadow leaves the object, and at
+6.2 degrees it leaves entirely — a roof at dawn shades somewhere else.
+
+The reason this is worth a case rather than an erratum is what it did downstream.
+The measurement it was attached to was correct and remains correct: the forecourt
+sits at 41 luma with 7% of range of tonal spread, and albedo detail cannot read
+there. But an attributed cause travels further than a measurement, because it is
+what tells other people what to change. On the strength of "the forecourt is in
+deep shade" one system was asked to bounce light off the soffit and another to
+raise the environment intensity — two fixes aimed at an occluder that does not
+exist. The real cause is that a horizontal plane at a 6.2 degree sun receives
+sin(6.2) = **10.8% of the beam**, uniformly, everywhere, whether or not anything
+is over it. That has the same symptom and the opposite prescription: the
+illumination cannot be raised without destroying the dawn, so the lever is
+specular response and relief, not more light.
+
+**A number and its explanation should be routed with different confidence.** The
+41 luma was measured; "because the canopy shades it" was inferred in one step from
+a figure I never checked the direction of, and it was the inference that got acted
+on. When passing a diagnosis to someone who will spend a round on it, say which
+half was measured.
+
+Two corollaries.
+
+**A cast shadow you cannot find is often displaced rather than absent.** Lighting
+ablated three shadow causes on the ground lattice earlier tonight and found all
+three negative; a shadow that has moved 43 m is indistinguishable from a shadow
+that is not being cast, from inside the region it left.
+
+**Grazing incidence is a stronger darkener than occlusion at dawn.** Being fully
+shaded costs a surface its direct term. Being horizontal at 6.2 degrees costs it
+89% of the same term. So a scene at dawn is full of surfaces that are dark for
+Lambert reasons and read as shadowed, and the first thing to check when something
+looks shaded is its own orientation, not what is above it.
+
+## 72. An unused constant cannot be wrong, so nothing corrects it, and the first consumer inherits a number nobody has checked
+
+`site.SUN.elevation` said 11 degrees. The renderer ships 6.2, held privately in
+`LightingSystem` as `SUN_ELEVATION_DEG`. Nothing in `src` reads the shared field —
+only `SUN.azimuth` is imported — so the two numbers coexisted for as long as the
+project has existed without anything going wrong, because nothing depended on it.
+
+Then the CPU probes arrived, and shadow geometry is exactly what a CPU probe
+computes. Three tools reached for the shared constant. One (Vegetation's
+`vegshadowfit.mjs`) discovered the discrepancy and hard-coded 6.2 locally with a
+comment. Two (`probe-canopy.mjs`, `probe-shadowsource.mjs`) are still reading 11
+and computing every shadow length **1.8x short**. My own `poolsite.mjs` did the
+same on its first run and reported a Lambert factor of 19% where the truth is
+11%.
+
+The failure mode is specific and it is not "a stale constant". It is that
+**staleness is unobservable in exactly the constants that are unused, and being
+unused is not a stable property.** A field with no consumers is never validated
+by anything, accumulates no pressure to be right, and looks authoritative because
+it sits in the shared file next to constants that are load-bearing. The moment a
+consumer appears it inherits a number whose only credential is that it has never
+been contradicted.
+
+Two habits follow. **A shared constant that the shipped code overrides privately
+is worse than no constant**, because the override is invisible from the consumer's
+side and the shared name is the one that gets imported — the same shape as the
+stale "`groundSoil` is NOT published" warning, which was believed because it was
+written down. And **when a constant is duplicated, the copy in the file that
+renders is the true one**; the fix is not to reconcile them but to delete one.
+`site.SUN.elevation` now holds 6.2 so that every consumer is right by default, and
+`LightingSystem` should import it rather than keep its own.
+
+## 73. A tolerance calibrated on one feature and reused on another can consume the whole range of the second
+
+The water arms in `worldDetail` grade over depth: `smoothstep(0.0, 0.020, depth)`
+takes standing water from "damp ground" to "mirror" over the first 20 mm. That
+number is right, and the reason it is right is a property of asphalt — water
+thinner than the 7 mm exposed aggregate presents the aggregate's microsurface
+rather than its own, so it takes 10 to 20 mm before a pool behaves as a surface.
+It was calibrated against `LOW_SPOTS`, whose dishes are 52 to 92 mm deep.
+
+Reused unchanged on a concrete slab-panel puddle it produced a null. A puddle in a
+settled forecourt panel is 20 to 30 mm deep at its deepest, so the 20 mm ramp
+consumed the entire depth range of the feature: measured before capturing, **76%
+and 71% of each pool now sits past the ramp, and with the inherited number it was
+13% and 0%.** The second pool had no mirror anywhere in it. Both would have
+rendered as damp patches and the round would have reported "the pools are subtle".
+
+What makes this its own case rather than an instance of "convert a tolerance into
+the units the feature lives in" is that the units were fine. 20 mm is 20 mm in
+both places. What differed was the **range of the quantity being thresholded**:
+the ramp was a small fraction of a lot hollow and the whole of a slab puddle. A
+threshold is only meaningful relative to the distribution it cuts, and reusing one
+across features means reusing it across distributions.
+
+The fix was not to retune the constant, which is shared and correct where it came
+from, but to notice that the thing it encodes — the depth at which water stops
+showing its dish — **is a property of the substrate and not of water.** It became
+a per-material parameter defaulting to the old value, so asphalt is unchanged to
+the bit and the slab gets 5 mm, which is what sub-millimetre float finish
+deserves. When a constant has to differ between two call sites, the useful
+question is which physical property it was standing in for; if that property
+varies between the sites, the constant was always a parameter.
+
+## 74. Restructuring generated content reseeds all of it, so a single-realization A/B compares two different worlds
+
+Any scatter that draws from one shared rng stream has this property, and every
+system here has one. Change the *structure* of the scatter — split a loop, add a
+group, reorder two branches — and every subsequent draw shifts, so the arm you
+are comparing against is not the old world with your change in it. It is a
+different random world. The diff you measure is your change plus a complete
+reseed of everything the scatter placed, and there is no way to tell those apart
+from one pair of frames.
+
+I read three consecutive rounds of exactly this as evidence about one change:
+"the road corridor helped", "it hurt", "it hurt differently". The change was
+substantially the same each time. What moved was the seed.
+
+The size of the trap, measured: sweeping 16 seeds through the far scrub scatter,
+the seed-to-seed standard deviation of one measure — filled bearing bins across
+the highway at 60-90 m — is **3.9 against an effect of 6.4**. Every swing I had
+been reacting to was inside one standard deviation. The instrument was not wrong;
+it was being read one sample at a time.
+
+Three things fix it, and the third is the one that generalises:
+
+- **Sweep seeds and report the spread.** `scatterScrub` took an optional `seed`
+  and `tools/vegfringe.mjs` runs 16, printing the sd beside every figure so a
+  reader can see whether a difference clears it. The shipped seed is quoted
+  separately, because what ships is one draw and the photograph is judged on that
+  one.
+- **Make the change additive and prove it.** Groups selected by loop index rather
+  than by an rng draw, appended after everything else, cannot perturb an earlier
+  draw. That converts "probably fine" into a checkable claim, and it was checked:
+  1858 sites before, 2183 after, **identical prefix 1858, zero plants present
+  before and absent after**. With that established the comparison is paired and a
+  single realization *is* valid, because only the added members differ.
+- **Prefer the arrangement that cannot reseed.** Where a change can be expressed
+  as additive it should be, not for tidiness but because it makes the A/B sound.
+
+The general form: **a control arm must differ from the test arm in one thing, and
+"same code, different rng draw" is not one thing — it is everything the generator
+touches.** Before trusting any before/after over generated content, ask whether
+the change moved the stream. If it did, either sweep the seed or make the change
+additive and prove the prefix.
+
+## 75. A window that spans two directions reports their sum and hides the trade between them
+
+I measured the continuity of a scrub fringe by binning plants into 2-degree
+bearing bins and reporting the filled ones over bearings 140-220 degrees, which I
+named "the highway half". The highway runs along x and every standing position is
+at positive z, so the road side of the view is 180-360 degrees and *along* the
+road is 180 and 0. My window was one along-road cone plus a slice of the road
+side, and it could not see the +x direction at all.
+
+The consequence is specific and worth stating because it is not "the number was
+noisy": a change that added clusters **symmetrically in plus and minus x** read
+as a **loss**, because the window contained one of the two halves it added to.
+The measurement was correct. The aggregation destroyed the signal and inverted
+its sign.
+
+The fix was five named windows — road side, along road -x, along road +x, across
+road, behind lot — and the reason is general. **A scatter's shape decides how
+coverage is distributed between directions, so an instrument that sums over
+directions cannot see what the shape decides.** It reported "road side is up 5
+bins" for a change that took 6 bins from across-the-road and gave 11 to along-it,
+which is a trade a reader would want to weigh and could not.
+
+Two smells that name this class in advance: an aggregate whose window was chosen
+before the thing being measured was understood, and a window whose name is a
+direction ("the highway half") while its definition is a numeric range nobody has
+re-derived since. If the name and the arithmetic have to be checked against each
+other, check them.
+
+## 76. A predicate that encodes an assumption about extent becomes a different predicate when the extent changes
+
+`sitesOnRoof` in VegetationSystem asks whether a plant's ground height exceeds
+1.6 m and reports the hits as plants standing on the building's parapet. That is
+sound, and it was sound for as long as the assumption underneath it held: every
+plant lived within about 170 m of the lot, and inside 170 m the only ground above
+1.6 m is the roof.
+
+Extending the far scatter along the highway to 230 m broke the assumption without
+touching the check. The terrain genuinely rises out there, so the count went
+**17 to 36** in the round the corridor was added and the named culprits were
+clumps at (226, 12) and (-194, 13). They are on a hillside. Nothing in the output
+said "these are outside the range I was written for" — it said "36 plants are on
+the roof", in the same format as when it was right.
+
+The check now tests a place, because the roof is a place: restricted to the lot,
+and back to 0. The general form is that **an implicit precondition on a
+predicate's domain is invisible in its output, so a predicate whose false
+positives depend on where the population lives will start lying the moment the
+population moves** — and it will lie in the confident voice it used when it was
+correct. Two of these have now been found in this project by noticing a count
+change at the same time as an unrelated extent change; neither would have been
+found by reading the predicate.
+
+## 68. A criterion that cannot be read must fail, not print a question mark
+
+`tools/tiers.mjs` was written to prove quality tiers change what they claim to.
+Its first run printed this and reported **PASS**:
+
+```
+  tier  reported  programs  shaderMs  texMB  draws     tris  instances
+  high      high         ?         ?      ?    936  7891985      83996
+```
+
+Program count is the *headline* criterion — it predicts the ~92% of a cold load
+that is driver shader compilation. It was absent, and the run passed, because the
+only assertion compared instance counts and those were present. **The check did
+not fail; it failed to run, and printed a question mark where the answer should
+have been.** Fifth instance of this class today.
+
+Two fixes, and the second is the general one:
+
+- The instrumentation was not injected. `__GLSTAT` is not part of the app; it is
+  injected per page by the harness, and this harness had not been told to.
+- **A null measurement is now a failure.** Any tier whose program count or
+  texture bytes come back null fails the run explicitly, on the grounds that a
+  criterion which was not evaluated has not been satisfied.
+
+There is a coda worth keeping, because it is a smaller version of the same fault.
+After adding the injection the columns were *still* `?`, and the failure message
+said `__GLSTAT missing` — which was now wrong. The accessor was
+`__GLSTAT.snapshot()` and the real method is `mark()`, so the object was present
+the whole time and the harness was reading a name that did not exist. Optional
+chaining turned a typo into a silent null. **The guard was right and its
+diagnostic was wrong**, which is worse than a bare failure: it sends the next
+person to look at injection instead of at the property name.
+
+## 69. Sequential conditions in one browser: whatever runs first wears the artefact
+
+The tier harness measures three tiers back to back in one browser. Cold shader
+compilation costs ~10x on the first load of a fresh browser profile, so:
+
+| Run | first tier | its time | the other two |
+| --- | --- | --- | --- |
+| A | `high` | 234.9 s | 21.6 s, 21.8 s |
+| B | `low` | 268.7 s | 23.9 s, 23.2 s |
+
+**The penalty follows position, not tier.** Reversing the order reversed which
+tier looked catastrophic, and the effect is an order of magnitude — large enough
+to swamp anything a tier actually does.
+
+This was not designed as a control; it happened because a later change reordered
+the list. It is the substitution control anyway, and it would have been trivially
+easy to publish run A as "the high tier is ten times slower to load", which is
+false, plausible, and consistent with every other number in the table.
+
+The rule: **when conditions are measured sequentially in one process, the first
+measurement is a different measurement** (case 61 again, from a new direction),
+and a harness must either randomise order, warm the shared state before the first
+condition, or give each condition its own fresh process. Until it does one of
+those, it must print the warning *above* the table rather than beside it, because
+the table is what gets pasted into a report.
+
+## 70. A quality tier is two independent budgets, and cutting the wrong one changes nothing
+
+Measured here: a cold load is ~235–284 s, of which the driver is blocked
+compiling and linking shaders for **~216–247 s, or 92%**. Warm, the same figure
+is 2.0–2.4 s and ~10%. Same pipeline, either side of a populated program cache.
+
+So a quality system has two axes that do not substitute for each other:
+
+- **Compile-time**: program count, `onBeforeCompile` permutations, material
+  variants, transmission. Governs the wait before anything appears.
+- **Run-time**: triangles, instances, shadow resolution, fill rate, DPR.
+  Governs whether it holds framerate once running.
+
+The first tier system built here pulled the second axis hard — 300 MB of GPU
+memory, 30% of triangles, 74% of scatter instances — and **left program count at
+202 across all three tiers.** By the numbers above that means the low tier, aimed
+squarely at weak hardware, buys such a machine *nothing at all* on the thing its
+owner actually experiences: a four-minute wait, which on a slower compiler is
+worse than four minutes.
+
+The trap is that the run-time axis is the one that is easy to measure and easy to
+move from outside a system — instance counts and render targets are visible in a
+scene graph traversal, so a central module can pull them without anyone's
+cooperation. **The compile-time axis lives inside other people's material code**,
+which is exactly why a well-intentioned central tier system will pull the axis
+that does not matter and report a convincing table of savings.
+
+And it cannot be recovered at runtime: by frame 1 the programs are compiled, so
+lowering a compile-time lever later would trigger the recompile stall it exists
+to prevent. **The compile-time family is boot-only by nature**, which is why
+capability detection cannot be replaced by adaptive measurement, however much
+better measurement is than guessing.
+
+## 70. `ERR_MODULE_NOT_FOUND` on a file that exists is Node's resolver, not a broken module — `tools/ts-resolve.mjs`
+
+If a CPU tool dies like this:
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\...\src\gen\buildingGeo'
+    imported from C:\...\src\systems\BuildingSystem.ts
+```
+
+the module is fine. **Node 22 strips TypeScript types on its own, so
+`import "../src/gen/foo.ts"` works — but it will not resolve an *extensionless*
+relative specifier**, and `src/` is written for Vite, where `./noise` means
+`./noise.ts`. So the first hop succeeds and the second fails, which reads like
+the imported file being broken rather than the resolver being stricter than the
+bundler.
+
+Fix:
+
+```
+node --import ./tools/ts-resolve.mjs tools/your-tool.mjs
+```
+
+That hook appends the extension Vite would have (`.ts`, `.tsx`, `/index.ts`,
+`.js`) and does nothing else — no transpile, no DOM shim, no effect on the
+browser path. Without it, importing anything from `src/` with its own
+dependencies is a dead end, which is a large part of why CPU-side tooling here
+tended to re-implement `src/` logic instead of calling it. Re-implementing is how
+two copies of a constant get created, and two copies is the failure in case 68.
+
+## 71. A term can be inert because of where the surface sits on the tone curve, and removing it is still right
+
+The cooler liner carried `emissiveIntensity: 0.22` as a stand-in for tube lights,
+with a comment saying it was kept low "so the liner does not blow out to paper
+white and swallow the silhouettes of the bottles standing against it" — and 5750
+clipped pixels later said it was doing exactly that.
+
+The obvious diagnosis was a **double count**: `lightInterior.ts` had since placed
+three `RectAreaLight`s at 7.0 in the cooler, aimed back into the cabinet, so the
+lamps the term stood in for now existed. Confident, mechanical, and wrong.
+
+Measured on one pose from one build and one browser, as pixels over luma 235 out
+of 170,315:
+
+| term | owner | effect |
+| --- | --- | --- |
+| liner emissive 0.22 | this system | **+117 px (0.07%)** |
+| `?ibounce=0.35` room bounce | Lighting | 1,341 px (0.8%) |
+| `?lamp=0.5` | Lighting | −53,064 px (31%) |
+| `?lamp=0.25` | Lighting | −155,821 px (91%) |
+
+The term I was about to claim as the cause is worth **0.07%**. The reason is case
+42 from the other direction: **a surface pinned to the flat top of the tone curve
+absorbs any small additive term without showing it.** The same 0.22 on a
+mid-tone surface would have been plainly visible. So "is this term doing
+anything" has no answer independent of where its surface lands on the curve —
+which means an inert term cannot be exonerated *or* convicted by reading it.
+
+Two things follow.
+
+**Removing it was still correct, for a different reason than the one I had.** Not
+because it was costing radiance, but because a value that models nothing and
+measures nothing is a value somebody later tunes in good faith. It went out with
+its measurement written next to it and a flag to restore it.
+
+**And the decomposition is the deliverable, not the fix.** The blowout is 91%
+one lever, and that lever belongs to another system. Handing over "your cooler
+lamps at 7.0 put a 0.78-albedo liner on the top of the curve, here are the four
+numbers" is worth more than any adjustment I could have made on my side — and
+adjusting my albedo to compensate would have been the exact class of local
+correction this file spent the previous night removing.
+
+## 72. A harness with its own copy of the shot list silently drops the pose you came for
+
+`shoot2.mjs --shots=grab,cooler` reported `1/1 screenshots` and a complete round.
+`grab` — the pose added specifically to reproduce the defect under investigation
+— does not appear anywhere in the output, because the harness holds a
+hand-written `ALL_SHOTS` array and the argument is applied as
+`ALL_SHOTS.filter(s => ONLY.includes(s))`. A name the array does not know
+filters to nothing, quietly.
+
+This is case 68's shape in a tool rather than a system: **a second copy of a list,
+and the copy that wins is the one nobody thought of as authoritative.** It is
+worse than a missing capture, because the round's own completeness check compared
+what was written against the same filtered list and agreed with itself.
+
+The import cannot be removed here — pulling `src/gen/buildingShots.ts` into Node
+drags the whole Vite-resolved graph with it (see case 70) — so the duplicate
+stays. What was removed is the silence: an unrecognised shot name now exits 2 and
+prints the known list. **If a duplicate cannot be eliminated, make disagreement
+between the copies fatal.**
+
+## 77. A shared constant that no shipping code reads cannot be validated by the scene looking right
+
+`src/site.ts` exported `SUN.elevation` at 11 degrees. `LightingSystem` lights the
+scene from a private `SUN_ELEVATION_DEG = 6.2`. Nothing in `src/` imported the
+shared field. So the wrong number sat in the file that looks most authoritative
+in the repository, for as long as the file has existed, and no render could ever
+have disagreed with it — because no render consulted it.
+
+The usual defence against a wrong constant is that the scene would look wrong.
+That defence requires the constant to be on the path that draws pixels. This one
+was not. Its only consumers were CPU probes, which is exactly the population that
+trusts a shared constant most: a probe imports `site.ts` **because** it wants the
+authoritative number rather than a local guess, and importing it is the
+responsible thing to do. The reward for being responsible was a sun 1.8x steeper
+than the one that ships.
+
+It misled three probes across two systems, and the derived quantity travelled:
+the solar tangent 0.194 was circulated to four systems as the threshold for
+"will this slope catch relief lighting", against a true 0.109. Shadow reach came
+out at 24.3 m instead of 43.5 m. Both conclusions happened to survive, which is
+luck, not validation.
+
+**A constant is only as checked as its most pixel-facing consumer.** Two rules
+follow. If a shared constant is not read by shipping code, it has no error
+signal at all and needs an explicit cross-check — one probe whose whole job is
+to assert that the shared field and the private field agree, and to fail when
+they do not. And when shipping code holds a private copy of a shared quantity,
+the private copy is the authority whether anyone intended that or not, because
+it is the one the photograph is evidence about.
+
+### The sharper form: a defensive read that has never once read anything
+
+The tool that produced the 0.194 figure held this line:
+
+```js
+const sunTan = Math.tan((SUN?.elevationDeg ?? 11.2) * (Math.PI / 180));
+```
+
+The field is `SUN.elevation`, and it is in radians. `SUN.elevationDeg` does not
+exist and never did, so `??` fired on every run the tool has ever made. The tool
+did not read a stale constant — **it never read the constant.** It read its own
+default, while naming the shared field in the source, which is why the audit that
+grepped for consumers of `SUN.elevation` found it and assumed it was fixed by
+fixing the constant.
+
+`?.` plus `??` reads as caution and behaves as suppression. It converts a misspelt
+field, a renamed field, a unit change and a deleted field into the same outcome: a
+plausible number, no warning, no stack. The two defects it is protecting against
+are not comparable — an absent optional input deserves a default, a misspelt
+required input deserves a throw — and the idiom cannot tell them apart.
+
+The corrected line has no fallback and throws, because a tool that cannot find
+the sun must not guess it, and because **every conclusion in that tool's output
+is a comparison against that one number.** A default is appropriate exactly when
+the caller can tolerate being wrong about it; when the number is the axis the
+whole report is measured along, tolerating being wrong about it is the failure.
+
+## 78. A timeout shorter than the phenomenon reports a healthy system as broken
+
+Cold loads here are 221-302 s. Readiness waits across the suite were 90-240 s, and
+Playwright's default is 30 s. **27 fatal sites in 26 harnesses.**
+
+The failure mode is what makes this expensive rather than merely wrong. A build
+that is working perfectly reports *"never became ready"* with an empty page
+console — which is indistinguishable from a shader link failure, and was
+diagnosed as one more than once. **A timeout converts "slow" into "failed", and
+"failed" is a different kind of claim: it invites a root-cause hunt for a defect
+that does not exist.**
+
+The dangerous tier is not the shortest one. A 90 s budget fails every cold load
+and gets noticed as "this never works". **A 240 s budget sits inside the 221-302 s
+range, so it fails intermittently and reads as flakiness** — and sixteen of the
+twenty-seven sites were at 240 s. Intermittent is worse than never, because never
+gets fixed.
+
+Second fault, independent of the first and present in 26 harnesses:
+`waitForFunction` defaults to `polling: "raf"`, and **rAF does not fire while the
+main thread is blocked.** The poll is starved during precisely the stall it exists
+to observe. Raising the timeout without setting `polling: 500` fixes half of it
+and leaves a check that still cannot see the thing it waits for.
+
+## 79. Three ways a static analyser lies about the code it audits
+
+The timeout audit above first reported **120 fatal sites**. The real number was
+27. All three errors inflated it, and all three are generic to any tool that
+greps code for defects:
+
+1. **Constants.** `timeout: READY_TIMEOUT_MS` matched no numeric literal, so it
+   was graded as absent and therefore fatal — including in a harness that passes
+   an explicit 420 s. **A scanner that reports named constants as missing values
+   punishes good style and calls it a defect**, and the harnesses most likely to
+   name their constants are the ones most likely to have thought about them.
+2. **Documentation.** A `waitForFunction` inside a header comment, written to
+   show callers the correct call, was counted as a live site. Comments must be
+   blanked *while preserving line numbers*, or every reported location shifts.
+3. **Grading unlike things alike.** Navigation timeouts were graded against the
+   same threshold as readiness waits, which tripled the count. `main.ts` does not
+   await `start()` at top level, so `load` fires before init and a navigation
+   timeout never waits on a cold load. **The two look identical in a grep and
+   have entirely different risk.**
+
+The general rule, and it is the same one as the null-measurement case: **when the
+analyser cannot resolve something, the answer is UNKNOWN, not the default.** The
+tool now reports unresolvable identifiers rather than assuming the worst about
+them — because a scanner that inflates its own findings gets ignored at exactly
+the rate a 42:1 false-positive rate earns.
+
+## 80. Paying a fixed cost per iteration instead of per run
+
+Six captures in one browser: 355 s. The same six as separate runs: ~1500 s. The
+difference is that **a cold browser pays 216-247 s of driver shader compilation
+and a warm one pays 2 s**, so at ~230 s per cold start the *browser* count is
+nearly the entire cost and the *arm* count is nearly free.
+
+So multi-arm capture in a single browser is not an optimisation to reach for when
+convenient — with a fixed cost this large it is the only viable way to capture
+anything cold, and any harness shaped as `for (arm) { launch; measure; close }` is
+paying the dominant cost once per arm for no return.
+
+The same property has a sharp edge, and both halves must be held at once: because
+the first arm pays the compile and the rest do not, **the first arm is never
+comparable to the others** (case 69, tier ordering). The thing that makes the
+pattern cheap is the thing that makes its first measurement worthless.
+
+## 81. A new overlay does not need a new entry in the suppression list, if it goes inside an existing one
+
+**If you are adding a DOM overlay to `index.html`, read this before you add it to
+anything.**
+
+Canvas screenshots in this project photograph the *page* clipped to the canvas
+box, not the canvas contents, so any element over the viewport lands in the file
+— this is how `#hud`'s "Click to look around / WASD to walk" ended up baked
+across every reference frame `walkprobe` had ever produced, and an outside critic
+called the frame unusable before anyone noticed the text was ours.
+
+The defence is an enumerated list of element ids that each harness hides before
+it shoots, e.g. `tools/walkprobe.mjs`:
+
+```js
+const OVERLAYS = ["hud", "loading", "reticle"];
+await page.evaluate((ids) => { for (const id of ids)
+  document.getElementById(id)?.style.setProperty("visibility", "hidden"); }, OVERLAYS);
+```
+
+Enumerated on purpose, so a new overlay shows up in a reference frame and gets
+noticed rather than being silently swallowed by a rule written before it existed.
+The cost of that choice is the obvious one: **every new overlay looks like it
+needs an edit to every harness that has such a list, and those harnesses belong
+to other agents.**
+
+It usually does not, and the reason is one line of CSS semantics: the list uses
+`visibility`, and **`visibility` inherits.** So an overlay nested inside an
+element already on the list is suppressed by the existing entry, in every harness
+that has one, with no edit anywhere.
+
+The interaction prompt ("press E to start the pump") is a child of `#reticle` for
+exactly this reason, and it joined three harnesses' suppression lists without
+touching any of them. **Anything added inside `#reticle` later inherits the same
+protection.** Two conditions, both easy to check and both easy to lose:
+
+- The list must hide with `visibility`, not `opacity` or a class. `display: none`
+  would also inherit in effect, since children of a `display: none` parent are
+  not rendered; `opacity` would not compose the same way and a class-based hide
+  reaches only the element it is put on.
+- The nesting must be real containment, not just visual adjacency. A prompt
+  positioned *near* the reticle but parented to `<body>` gets none of this.
+
+There is a design dividend rather than only a testing one, which is why it is
+worth preferring the nesting even where the suppression list is not a concern:
+one element to show and hide means one visibility rule, one transition curve and
+one state machine deciding when the whole assembly is on screen — so the parts
+cannot disagree about whether they are visible. The reticle's dot and its prompt
+share `.shown` and `.reach` and therefore cannot get out of step.
+
+The trap to avoid while doing it: put the state class on the *container* and the
+visual transforms on the *children*. `#reticle.reach .dot { transform: scale(1.45) }`
+scales the dot only. Had the dot stayed the container, the prompt would have
+inherited its 1.45x scale and the wording would have jumped size every time
+something came into reach.
+
+## 73. A shader feature's cost is not its program count, and the flag that gates it may buy far more than it was chosen for
+
+`ctx.quality.transmission` was picked as a tier lever because **transmission is a
+large shader**, and shader compilation is 92% of the cold load here (215,956 ms
+cold against 2,003 ms warm, measured from inside GL). The expected win was
+program count.
+
+Measured on one build and one browser, three arms, on a pose containing the only
+two transmissive materials this system owns:
+
+| arm | programs | draw calls | triangles |
+| --- | --- | --- | --- |
+| high | 144 | 472 | 6,908k |
+| `?bgtrans=0` (this flag alone) | **138** | **369** | **4,959k** |
+| `?tier=low` (whole tier) | 138 | 369 | 3,200k |
+
+Six programs, as expected. **And 103 draw calls and 1.95 million triangles** —
+22% of the draw calls and 28% of the triangles in that frame, from two materials
+on one object 200 mm across.
+
+The reason is that `transmission > 0` in three.js does not only compile a bigger
+shader: it makes the renderer **re-render the whole scene into a transmission
+target**. So the cost is not attached to the transmissive object at all. It is a
+second copy of everything else, and it scales with scene complexity rather than
+with the size or number of the transmissive materials. Two leaves on a bottle
+priced a full extra pass over the building, the shelving and the stock.
+
+Three things follow.
+
+**Price a feature by what the renderer does with it, not by what it looks like in
+the material.** A `transmission: 1.0` on one small object and a `transmission:
+1.0` on forty of them cost nearly the same, and both cost roughly the whole
+frame again.
+
+**A flag chosen for compile time can be a frametime lever, and vice versa.** This
+one was justified on the cold load and is worth more per frame than it is per
+launch. Neither number would have been found by reading the material.
+
+**Isolate the flag from the tier.** `?tier=low` moves shadow map size, world
+capture and detail patches at once, so its 144 → 138 cannot be attributed to any
+one hook — and here it happens to be *entirely* this hook, which a whole-tier
+measurement would have credited to the tier. The instruction was to prove
+`programs.length` falls rather than that the flag parsed; a per-flag override that
+does not change the tier is what makes that provable.
+
+**And the no-op direction needs proving too.** The high-tier capture is
+**byte-identical (md5 `fac1fe7e…`)** to the same pose from the previous round,
+built before this hook existed. An unchanged mean or a passing health check would
+not have been evidence; identical bytes across two different bundles are.
+
+One trap on the way: the first attempt measured the arms at **137 programs each**
+and looked like a null. The pose did not contain the hero bottle, so neither
+material was ever compiled. **A feature flag is only measurable in a frame that
+would have used the feature**, which is obvious in hindsight and reads exactly
+like a flag that did not bind.
+
+## 83. Shader-cache warmth belongs to the profile directory, not to the machine
+
+The finding that makes the previous three cases actionable, and it inverts the
+intuition. A cold load here is 192-349 s and a warm one ~21 s, and the difference
+is **not** a property of the host, the driver, or how many times that machine has
+compiled these shaders. It is a property of **the browser profile directory.**
+
+Every fresh `mkdtemp` profile measures cold on a host that has compiled this
+scene's shaders dozens of times over. `chromium.launch()` creates a throwaway
+profile and discards it, so a harness using it pays the full cold compile on
+every single run, forever, no matter what ran before.
+
+Two consequences that pull in opposite directions, and both must be held:
+
+- **For anything where load is setup cost**, an ephemeral launch is a standing
+  tax of five to six minutes per run. A persistent `user-data-dir` removes it
+  entirely. On a thirty-minute exclusive window, that is a quarter of the window
+  spent on a step budgeted at twenty seconds.
+- **For anything measuring load**, a persistent profile *silently deletes the
+  phenomenon*. The run does not fail; it succeeds and reports a healthy 21 s for
+  something a user experiences as four minutes. That is the more expensive
+  direction, so the warm launcher is opt-in, refuses to be the default in the
+  harness that reports a ready time, and prints which regime produced the number
+  next to the number itself.
+
+The intra-process exception is worth knowing because it explains an old
+reconciliation: within one browser process, contexts 2..N *do* inherit warmth
+from context 1. That is why a pre-warm page works at all, and why a harness with
+one can look warm while believing itself cold. But it dies with the process, and
+it only helps if the pre-warm actually waited for compilation rather than for
+`domcontentloaded`.
+
+## 84. A timeout that cannot be found by reading the number
+
+The sharpest version of the timeout class, and it defeats careful review rather
+than rewarding it.
+
+```js
+await page.waitForFunction(fn, { timeout: 240_000 });   // effective: 30 s
+```
+
+Playwright's signature is `waitForFunction(pageFunction, arg, options)`. A
+two-argument call puts the options object in the **arg** slot, where it is passed
+to the page function as data and quietly ignored, and the real options default.
+**The source says 240 s. The runtime uses 30 s.** Verified directly: the same call
+with a never-true predicate throws `Timeout 30000ms exceeded`, and 5 s once a
+`null` is placed in the second position.
+
+Three things make this worth its own case:
+
+1. **It is invisible to a scanner that reads literals**, which is what my own
+   timeout audit did. The number is present, correct-looking, and never used. The
+   detector now checks the *shape* — counting top-level commas outside the
+   predicate body — and grades a positional call as fatal whatever its literal
+   says.
+2. **It punishes diligence.** An auditor who opens the file and reads the timeout
+   sees eight times the margin that exists, and comes away reassured.
+3. **It survives review by coinciding.** The only other instance found across the
+   suite had an intended value that happened to equal the 30 s default, so
+   nothing ever behaved unexpectedly and nothing prompted a second look.
+
+The general form: **an API that accepts a valid object in the wrong position
+cannot report the misplacement**, which is the same shape as `addEventListener`
+accepting `undefined` and as `textContent` returning `""`. The argument was
+well-formed; only its position was wrong, and position is not a type.
+
+## 85. Truncating an ordered list is only sampling if the order is random
+
+`InstancedMesh.count = authored * d` draws instances `0..n-1`. That is uniform
+thinning **only if instance order is spatially uncorrelated**, and a scatter built
+group by group is maximally correlated.
+
+Measured consequence in the shipped low tier: one layer fills as annulus, then
+gap ring, then road corridor in contiguous blocks, so `d = 0.25` **did not thin
+the far scrub — it deleted the gap ring and the road corridor outright and kept
+the annulus whole.** Those two blocks existed to close a fringe defect a critic
+had already reported. Another layer fills in grid-scan order, where the same
+operation removes a contiguous band of z.
+
+Three things make this worth recording beyond the fix:
+
+- **The aggregate metric was correct and useless.** The harness verified
+  instances fell 83,996 → 21,924 and passed. The count was right, the spatial
+  distribution was destroyed, and no count-based check can tell those apart.
+- **It reads as someone else's bug.** A hole where the gap ring was looks like
+  the layer failed to generate, in the file of whoever owns that layer, not like
+  a central lever thinning wrongly.
+- **The fix belongs in the lever, not in each system.** Shuffling each baseline
+  mesh's instance buffer once with a fixed seed gives uniform sampling to every
+  system including ones not yet written. Fixing it per-system would need every
+  future scatter author to know.
+
+Guards worth keeping, because the shuffle is only safe under conditions that
+could quietly change: it runs **only when something is actually being thinned**,
+so the default tier never touches an instance buffer; it refuses meshes whose
+geometry is shared or which carry custom instanced attributes; and it records
+each mesh's `instanceMatrix.version` so a system that starts rewriting instances
+by index gets a loud warning instead of silently swapped objects. **Every
+`setMatrixAt` in this scene is in a build loop, which is exactly why the check
+that it stays that way is cheap and worth having.**
+
+## 86. Program count cannot see the change that saves the time
+
+Four owners were asked to gate `onBeforeCompile` sites to cut a 216 s cold shader
+compile, with program count as the pass criterion. The first hook landed, worked,
+and moved nothing: **143 programs before and after**, with the system's own share
+going 6 → 0.
+
+The six were replaced one-for-one by stock-key programs, because those materials
+have **define sets unique in this scene** — combinations of `map`, `alphaTest`,
+`vertexColors`, `DoubleSide`, `shadowSide`, `dithering` that nothing else uses —
+and three.js keys its program cache on the define set. Each costs a program
+whether or not a shader is injected.
+
+**Gating a patch site reduces program *size*. It reduces program *count* only
+when the material's defines then collide with another's.**
+
+So the criterion was measuring the wrong quantity in a way that would have
+actively misdirected effort: a full round of correct gating could cut a real slice
+of 216 s with the count pinned at 143 and be scored as no progress, while a change
+that merged two materials and saved one link would be scored as a win.
+
+The generalisation is about proxies, not about shaders. **Program count was
+chosen because it is cheap to count and hard to fake** — both true, and neither
+implies it tracks the cost. The number that moves is `blockedMs`, driver time
+blocked in compile and link, 215,956 ms cold against 2,003 ms warm.
+
+And the sharpest form of the proof problem, which applies to every one of these
+hooks: **"count unchanged" is what a working flag and a broken flag both print.**
+The resolution is not a better threshold but a better observable — the system
+printing *its own share* of the cache alongside the total turned a null into a
+diagnosis, and belongs in every hook's verification.
+
+## 87. A surface can lose its printed content to the viewing angle, and that looks exactly like a map that never bound
+
+Film's playtest called two large white rectangles floating in the shop interior
+the single worst-looking thing in the build, and offered the two candidate
+causes that a still frame cannot separate: **a material with no map assigned**,
+which renders as flat geometry, or **a correctly-mapped surface blown out** by
+interior lighting. The routing was sound and the instrument for it was named:
+railed pixels mean exposure, flat-but-below-255 means nothing is being drawn.
+
+It was neither, and the third possibility is the one worth writing down.
+
+The measurement, on frames already on disk. The clipped-pixel count inside both
+rectangles was **zero**, with a peak luma of 234, so the exposure branch was out
+in one command. But the missing-map branch was out too, and by a stronger
+argument than a pixel value: **the same object, in the same capture session, from
+the same build, at a shallower angle, is fully printed.** `glass-65.png` shows it
+as a legible "NOW HIRING / APPLY WITHIN" notice, and `at-wall.png` shows it
+printed from inside. A map is bound or it is not; it cannot be bound at 65° and
+absent at 82°.
+
+What changed with the angle was the amount of content left, and the right
+observable for that is not the mean or the standard deviation but the **number
+of distinct luma codes the region spends its pixels on**:
+
+| region | mean | sd | distinct codes |
+| --- | --- | --- | --- |
+| the notice at 65° | 178.6 | 39.65 | **163** |
+| the notice at 82° | 231.6 | 1.36 | **6** |
+| shelving behind the same pane, 65° | 120.2 | 33.21 | 230 |
+| shelving behind the same pane, 82° | 108.2 | 29.52 | 160 |
+
+Twelve thousand pixels spending themselves on six codes is not a subtle loss,
+and the control is what makes it attributable: **the darker things behind the
+same glass at the same angle keep their contrast.** A pane that had simply gone
+opaque or milky would have taken the shelving with it. Only the surface that was
+already near the top of the tone curve ran out of room.
+
+So this is case 42 — *a modulation is only visible where the product lands on a
+part of the tone curve that still has slope* — arriving from a new direction.
+There the emitter's intensity was owned by another system and pushed the map
+into the shoulder. Here the **viewing angle** does it, through grazing-incidence
+reflectance, and the surface with the least headroom is the first to go blank.
+
+### The rule
+
+**Before concluding a map never bound, find the same surface at a different
+angle, distance or exposure in a frame you already have.** A map is a property
+of the material; content loss that depends on the camera is a property of the
+tone curve, and the two are the same picture and opposite fixes. The
+discriminating statistic is the distinct-code count, not the mean, and it needs a
+*darker control in the same frame behind the same intervening surface* — without
+it, "flat and bright" is equally consistent with a veil over everything.
+
+### And the measurement that stopped a clean story being told
+
+The obvious mechanism was the additive reflection leaf adding a near-constant
+radiance over everything behind the pane. It is refuted by the table above,
+using the attribution guard: **ask which of your own measurements the proposed
+cause could not have produced.** A uniform additive term cannot raise the
+notice's mean by 51 codes while *lowering* the shelving's by 12. Two mechanisms
+remain — the reflection leaf washing a bright surface, and the pane at 82°
+mirroring something bright over that part of the frame — and they are separable
+only by an ablation, not by more staring. The finding was published with the
+mechanism named as unresolved rather than with the plausible half asserted.
+
+Related: the third item in the same report, a "smaller blank panel near the
+bollard", measured **105 distinct codes** and is not blank at all. It is
+low-contrast, which is a legibility complaint and a different repair from either
+candidate cause. Three objects described identically by eye; three different
+numbers.
+
+## 78. A cache key containing the object's identity is correct, maximally pessimistic, and looks like neither
+
+`applyWorldDetail` keyed its shader programs `wd:<materialName>:<flags>`. That is
+correct: no material can ever be handed another's compiled program. It is also
+the most expensive key expressible, because the material's *name* cannot affect a
+single instruction — so eight materials got eight programs even though five of
+them emit byte-identical source, on a project where the cold load is ~92% driver
+link time.
+
+The reason it survives review is that both failure directions look the same in
+the source and neither shows up in the picture:
+
+- **Key coarser than the source** — silent and serious. three hands the second
+  material the first's program. No link error, no warning, no console output; the
+  ground simply renders with another surface's arms.
+- **Key finer than the source** — silent and merely expensive. A duplicate
+  program, paid for once per material at load, invisible in every frame.
+
+**A key may always be finer than the source requires; it may never be coarser.**
+So the safe transformation is to key on the things that *determine* the emitted
+source and nothing else — here the gate booleans plus the uniform declaration
+block — and the safe test is not equality of keys but the one-sided invariant:
+*same key with different source must fail; different key with same source is a
+note.* The first version of that test asserted key equality and failed on the
+harmless side, which is the shape of check that gets switched off.
+
+Measuring it also refuted a bit that had been in the key since it was written:
+`useAnti` distinguished programs whose source was identical, because the
+anti-tile arm is always emitted and switched by a uniform *value*. Values are
+free — they are not part of a program — so a flag that only changes a value has
+no business in a cache key. That is worth checking for wherever
+`customProgramCacheKey` is used: **the question is not "does this option change
+the material", it is "does this option change a character of the source".**
+
+### And the instrument that could not measure what it was built for
+
+The same round added a timer for the thing the tier exists to cut — the
+main-thread block that is the driver linking — and it reported 0.7 s, 0.7 s and
+0.3 s across three arms, which reads as a clean win for the reduced arm.
+
+It is cache order. All three arms ran in one browser process and therefore shared
+one driver program cache: arm 1 paid the link cost and arms 2 and 3 were warm by
+construction. **An A/B where B runs after A on shared warm state measures the
+order, not the change** — and it will always favour whichever arm ran last, which
+is usually the one being advocated for. The timer is kept, labelled, and
+explicitly not quotable; a cold measurement needs one fresh process per arm.
+
+## 88. A stance chosen by the person writing the test can only test what they were thinking about
+
+Taking a bottle from the cooler was **impossible** — one of the three
+interactions in the brief — and the interaction harness passed 91 of 91
+assertions over it. Nearest-first picking meant the open cooler leaf, which
+swings across the sight line and sits 0.62 m from the eye, always beat the shelf
+behind it. Every attempt to take a drink shut the door instead.
+
+The harness had a cooler test. It stood 0.95 m out from the leaf centre and
+aimed at the leaf, and it was correct: it verified that the cooler opens, closes,
+and says so. **It could never have found this, because the stance was picked to
+look at the door.** The bug lives at the stance a player adopts *after* opening
+it, which nobody writing a cooler test thinks to choose.
+
+The general shape: a stance, pose, distance or heading chosen by hand encodes the
+author's model of what the code does, so it tests that model rather than the
+code. The fix is not a better-chosen stance, it is to stop choosing — enumerate
+every position the collision field says a body fits in within reach, and assert
+over all of them. That derivation is ten lines and it turns "I checked the
+cooler" into "there is nowhere a player can stand and fail".
+
+Two details that make the enumeration honest rather than decorative. **Derive per
+state**, because a cooler leaf is a blocker that moves and the pocket in front of
+a shut door is somewhere the open door sweeps through — one list reused for both
+states tests the open door from places a player cannot be. And **keep the
+counter-test**: before the cooler is opened the bottle must *not* win, or a
+priority rule that fixed the taking would silently delete the opening by letting
+the player reach through shut glass.
+
+Also worth knowing before writing this kind of derivation: **`collision.field` is
+published by `PlayerSystem.init()` after its `if (ctx.shot) return`**, so on any
+`?shot=` capture page the service is simply absent. A spot-derivation written on
+the capture page produces an empty list and every assertion over it passes.
+
+## 89. A clamped `dt` turns a frame hitch into lost ground, in proportion to speed
+
+Two runs measured sprint speed by ground displacement in the same build: 2.38 m/s
+and 2.158 m/s, the second 9.3% short. The walk measured **exactly 1.400** in both.
+A speed that is right at one target and 9.3% low at a higher one looks like an
+acceleration or collision defect at the higher target, and it is neither.
+
+`Game.frame` runs `const dt = Math.min(this.clock.getDelta(), 0.1)`. A frame that
+takes 300 ms advances the simulation 100 ms, so the body covers 200 ms less ground
+than wall clock says it should — and **the loss is `v` times the excess**, so the
+identical stall costs a 2.38 m/s sprint exactly 1.7x what it costs a 1.4 m/s walk.
+One 290 ms frame inside a 2 s window is the whole 9.3%. Whichever window the
+hitching lands in reads short, and the other reads exact.
+
+The clamp is right and must stay: unclamped, that same 300 ms frame advances the
+body 0.71 m in one step against a 0.32 m collision radius, i.e. through a wall.
+
+What this changes is measurement. Displacement over **wall clock** is what the
+player feels and is the number to quote for feel; displacement over **simulated
+time** is what the controller delivered and is the only one an assertion may use,
+because otherwise a busy machine reports a working feature as broken (case 78).
+Carry both, and report their difference as the clamp loss rather than absorbing it
+into a tolerance — a tolerance wide enough for a contended run is also wide enough
+to pass a real regression.
+
+The same correction applies to anything integrated per frame. The jump apex read
+311 mm on a contended machine and 297 mm on a clean one against an analytic
+319 mm, and neither was wrong: semi-implicit Euler takes gravity off the velocity
+before integrating position, losing about `JUMP_SPEED * dt / 2` — 21 mm at 60 Hz,
+and 106 mm at the 100 ms clamp. **A fixed band wide enough to survive the worst
+frame rate would also pass a hop that had lost a third of its height**, so the
+expectation is computed from the frame time the arc was actually built out of.
+
+## 90. A detector that cannot read its input should say UNKNOWN, not pick a branch
+
+Built a pre-measurement check that answers "is the card clear of browsers". Two
+failures in it inside ten minutes, both instructive, and the second nearly
+destroyed a sibling's live run.
+
+**First: the check that returns all-clear by failing to look.** `wmic` does not
+exist on current Windows builds, so `wmic process where "name='chrome.exe'"` does
+not report zero processes — it fails to execute and prints nothing, which is
+indistinguishable from finding nothing. A harness reported clean shutdown and
+left fifteen Chromium processes alive; a `wmic`-based verification would have
+agreed with the harness. The fix is a **negative control inside the tool**: query
+for a process known to be running (this very `node`) and refuse to report a clear
+card if the control returns zero. A detector that has not been shown to detect is
+not a detector.
+
+**Second, and worse: a verdict manufactured out of unreadable data.**
+`CreationDate` came back in a form `new Date()` could not parse, so ages were
+`NaN`. `NaN` propagates silently through `Math.max`, and every comparison against
+it is `false`, so `oldest - newest < 120` was `false` and the tool printed:
+
+```
+age: newest NaN s, oldest NaN s, spread NaN s
+      wide spread -> more than one cohort; the older ones are probably leaked
+```
+
+**It had no data whatsoever and produced a confident, actionable, wrong verdict**
+— and the action it recommended was killing eight processes that were a sibling's
+measurement running normally. With the date parsed correctly the same eight read
+`spread 0 s -> consistent with ONE live harness, not a leak`. The verdict was not
+merely unreliable, it was **inverted**, because `NaN` fails the comparison that
+would have produced the benign answer.
+
+Two rules from it. **A missing input must produce UNKNOWN, never a default
+branch** — same shape as a mean over zero pixels being NaN, and as the harness
+that printed `?` for its only real column and reported PASS. And **the
+consequential direction of a false verdict is worth checking explicitly**: this
+one defaulted toward destructive action, which is the expensive way round.
+
+Also worth keeping: **a process count cannot distinguish a leak from a live run.**
+One Playwright Chromium is four to six processes, so eight alive is equally
+consistent with one healthy harness and with two dead ones. Only start time
+separates them, which is why the age column exists at all.
+
+## 91. Key the program cache on the source, not on the material
+
+A cache key exists to answer one question: **would these two materials compile
+different GLSL?** Four of the six keyed sites in this repo answer a different
+question — *are these two materials differently configured* — by interpolating a
+caller-supplied `key: string` that identifies the configuration:
+
+```
+worldDetail.ts    wd:${opts.key}:${flagBits}      <- material NAME in the key
+buildingWeather   bw:${opts.key}:${flagBits}
+buildingCoursing  bc:${opts.key}
+buildingGlazing   bgfres:${opts.key}
+hardsurface       grime:${o.key}
+```
+
+Configuration identity is a **superset** of source identity, so this is always
+safe and sometimes wasteful: every distinct configuration costs a program link
+even when it emits byte-identical source. Measured in `worldDetail`, five of
+eight materials emit identical GLSL and paid five links for one program's worth
+of code — 6 of 193 programs at high tier, on a cold load where compilation is
+~92% of a four-minute wait.
+
+The generalisation, which is the useful half: **a value belongs in the cache key
+if and only if it changes a character of the emitted source.** Anything reaching
+the shader as a uniform *value* is free, no matter how visually significant it is.
+`antiTile` had been in one key since it was written while the anti-tile arm is
+always emitted and switched by a uniform — so it split byte-identical programs
+for the lifetime of the file.
+
+And the inverse error is far more expensive than this one, which is why the safe
+direction is worth naming rather than assuming: a key that fails to distinguish
+materials that *do* emit different source makes three hand the second material
+the first one's compiled program, silently, with no link error — the ground
+rendering with another surface's arms. **Over-splitting wastes seconds;
+under-splitting produces a plausible wrong frame.** So collapsing a key is only
+safe behind a standing byte-identity assertion, not behind a one-time
+measurement.
+
+**One live instance of the assertion being weaker than its docblock.** A
+compile-adjacent linter carries the comment *"Asserted rather than described,
+because if someone later makes the arm conditional this becomes the load-bearing
+distinction and the note below turns into a lie"* — and the code beneath it never
+touches its `fail` counter. It prints. Worse, its polarity is backwards for the
+change being contemplated: it prints `ok` when the option **does** change the
+source, which is the unsafe case once that option is dropped from the key. The
+comment correctly identified the future hazard, named it, and then did not gate
+it.
+
+## 67. Reading position four of your own tool's output as a percentile
+
+I quoted "interior p50 132.3 → 76.9" through a whole session of interior work, in a
+handover other agents act on. `regionstat` prints
+`mean, sd, meanR, meanG, meanB, R-B, min, max`, and position four is the mean of
+the green channel. The real p50s were 136 → 64.
+
+Nothing downstream broke, because the comparison was self-consistent — I was
+reading the same wrong column on both sides, so the *direction* held and only the
+labels were wrong. That is what made it survive: **a mislabelled statistic that is
+consistently mislabelled still produces correct comparisons, so the error cannot be
+caught by the numbers disagreeing with each other.**
+
+It was caught by crossing tools. `probe-shelfshade` prints an actual percentile
+ladder, and its p50 did not match the number I had been calling p50. Cross-tool
+agreement is usually run as a check on the *measurement*; here it caught a defect in
+the *reading*, which is the more common failure and the one nobody instruments for.
+
+It also nearly cost a real corroboration. Film had independently reported an
+exterior p50 of 82; my exterior "p50" of 91.6 looked like a 12% disagreement on a
+different pose. On the correct statistic mine is 84, which is two levels from
+Film's — agreement between two harnesses, which is worth more than either number
+alone and would have been written off as noise.
+
+**Print the header, or name the column in the call site.** A row of eight bare
+floats invites this, and it invites it most from the person who wrote the tool.
+
+## 92. "Repetitive" and "periodic" are different claims, and a tiling probe only tests the second
+
+Film's playtest called the gravel verge in the spawn frame "high-frequency,
+visibly repetitive, and it dominates the bottom third" — the largest and least
+attractive thing in the first frame anyone records.
+
+`tools/probe-period.mjs` says the region is **not periodic**: max r 0.235, and
+the peak lag disagrees between every band (120, 150, 82, 25, 101, 27 px
+horizontally) where a real repeat shows the same lag in all of them, as its own
+selftest does at r 1.000 on a planted 23 px stripe.
+
+Both are correct, because they are about different quantities. The verge is an
+`InstancedMesh` of 24000 stones, and **every stone was the same stone at the
+same tone.** A field of identical instances repeats in *identity* while having
+no spatial period whatsoever — the instances are scattered at random positions,
+so autocorrelation finds nothing, and there is genuinely nothing for it to find.
+
+The mechanism is worth stating on its own, because it is a one-line mistake that
+reads as correct and had a comment defending it:
+
+```ts
+// Per-vertex tone so a field of stones is not one colour at two sizes.
+const sc = new Float32Array(stoneGeo.getAttribute("position").count * 3);
+for (let i = 0; i < sc.length; i += 3) { const v = 0.72 + rng() * 0.5; ... }
+stoneGeo.setAttribute("color", new THREE.BufferAttribute(sc, 3));
+const stones = new THREE.InstancedMesh(stoneGeo, stoneMat, 24000);
+```
+
+**A per-vertex attribute on shared geometry is a property of the object, not of
+the field.** `InstancedMesh` shares one geometry across every instance, so those
+twelve random vertex colours were drawn once and then reproduced 24000 times.
+The randomness is real, it is just spent inside a single stone. Per-instance
+variation needs `setColorAt`, which is a different API, and nothing warns you.
+
+The comment is the part that made it survive. It named the exact failure it was
+preventing — "not one colour at two sizes" — and it was true of the geometry and
+false of the field. A comment asserting the property you want is not evidence
+that the code delivers it, and it actively suppresses the question.
+
+### Ask which axis the repetition is on before reaching for a probe
+
+When an observer reports repetition, there are at least three different things
+they can be seeing, and they need different instruments:
+
+| percept | mechanism | what finds it |
+| --- | --- | --- |
+| repeats at a spacing | UV period, tiled map | autocorrelation sweep (`probe-period`) |
+| every element looks like every other | shared geometry, shared tone, one mesh | read the scatter loop; count what varies per instance |
+| everything is the same size | narrow-band field or narrow size distribution | percentile ratio of the feature scale |
+
+Only the first is periodicity. This project has now been told "it repeats" three
+times and found a different mechanism each time — aliasing in the near-field
+carpet, a real fixed world period in the asphalt lattice that a badly-scoped
+crop returned a confident null on, and now identity. **A critic reporting a
+percept from a rendered frame is right that something is wrong and owes you no
+mechanism**; treating their word as the diagnosis picks the instrument for them.
+
+### Two hypotheses refuted by arithmetic, including the one I preferred
+
+Worth recording because the refutations were cheap and both were wrong in an
+instructive direction.
+
+**Shadow dominance.** At a 6.2 deg sun a stone's shadow is 9.2x its protrusion,
+so the obvious guess is that a scatter reads as its shadows. It does not: the
+measured ratio is **1.6x and constant** across every percentile. A protrusion is
+vertical and subtends its own angle unforeshortened, while the shadow lies along
+the ground and is compressed by roughly sin(depression) — 0.45 at this pose — so
+the 9.2x stretch and the foreshortening very nearly cancel. **A world-space
+length and a screen-space length are not related by one factor when the two
+features lie on different axes**, and a low sun puts them on different axes by
+construction.
+
+**Contrast.** The intuition for "high-frequency and dominates" is that the region
+is too busy and too contrasty. It is the opposite: the verge is the **flattest**
+region in the lower frame, p10-p90 luma spread 14 in the immediate foreground and
+20 mid-band, against 34 on the forecourt and **42 on the dirt beyond the lot that
+has no gravel on it at all.** Adding 24000 stones *reduced* the tonal variation of
+the ground they covered, because at luma 128.3 against a soil of 125.2 they were
+within 2.4% of their own background. **A dense scatter the same value as its
+background is a low-pass filter on the region's appearance**: it adds spatial
+frequency, subtracts nothing, and averages away whatever large-scale structure
+the surface had. Busy and flat at the same time is a reachable state and it is
+worse than either.
+
+### Resolvability and spread are two properties, and one change moved only one
+
+The same round widened the stone size distribution, 14-76 mm to 24-122 mm. That
+raised the median stone from 3.9 to 7.2 screen pixels tall at the spawn pose,
+which is resolvability — below about 4 px a 20-facet icosahedron shows three or
+four facets at a pixel each and has no room for the lit facet that makes a lump
+read as a lump, so it contributes a dot and aliases as the camera moves. Same
+rule as `resolvableOctaves` on the dirt fbm, applied to geometry: **detail below
+what the view can resolve does not become detail, it becomes noise.**
+
+But the mark-scale spread went 4.9x to 4.5x — essentially unmoved. **Widening a
+single population's range does not widen the perceived scale spread**, because
+percentile ratios of a bounded distribution are stubborn; multi-scale needs a
+second population at a different scale and a much lower density. Claiming the
+size change fixed scale uniformity would have been the same error as claiming
+the amplitude fixed the wavelength in the `hash1` case: two properties, one
+measurement, and the one that moved is not the one that was wrong.
+
+## An unquoted heredoc delimiter eats the code out of your prose
+
+Appending a handover section with `cat >> file << EOF` rather than `<< 'EOF'`
+truncated it. An unquoted delimiter leaves backtick and `$` expansion on, so a
+document densely written in `` `identifiers` `` is parsed as command substitution.
+Bash warned about an unterminated heredoc, wrote a partial file, and **exited 0**.
+
+Third instance of one shape in this project, each in a different quoting context:
+
+- backticks in a **GLSL comment** ended the JS template literal holding the shader;
+- backticks in a **JS template literal** inside a shader-debug overlay, again;
+- backticks in **shell heredoc prose** describing both of the above.
+
+So the rule is not "watch out for backticks in GLSL". It is that **prose about code
+carries code characters, and every quoting context treats some of them as
+syntax.** Whenever documentation passes through a shell, quote the delimiter.
+
+The reason it is worth a case rather than a shrug is the failure mode, not the
+typo: a truncated document reads perfectly correct right up to the point where it
+stops. There is no error marker in the artefact, the exit code is 0, and the part
+that went missing is the part you wrote last — which is usually the conclusion.
+**Check the tail of anything you append.**
+
+## A gate that fires on the safe case is a gate someone switches off — and its polarity is worth checking twice
+
+A cache-key check in `tools/shaderlint.mjs` tested whether `antiTile` changed the
+emitted shader source. Its output:
+
+| does it change the source? | risk after the key collapse | what the linter printed |
+|---|---|---|
+| no | safe | `note` |
+| yes | **unsafe** | `ok` |
+
+**The one state that was dangerous was the one labelled `ok`.** Both labels were
+chosen while a coarser key made both states safe, and neither was revisited when
+the key changed — so the check kept reporting, accurately, in a vocabulary that
+had inverted underneath it.
+
+Two separate defects are stacked here and they are worth separating.
+
+**The polarity was backwards**, which is a one-character class of bug that no
+amount of reading the *value* catches, because the value was right. Only reading
+the value against the consequence catches it.
+
+**And it printed rather than failed.** The docblock beside it named the hazard
+exactly — "if someone later makes the anti-tile arm conditional this becomes the
+load-bearing distinction and the note below turns into a lie" — and then did not
+gate it. **A docblock that names a hazard is not a guard against it.** It is a
+note to a reader who may not exist, in a file that may be edited by someone who
+does not read it, and it converts a mechanical check into a human one.
+
+The general form, and the reason it matters more than it looks: a check whose
+output is a `note` costs nothing to ignore, so it will be ignored, and a check
+that flags a *correct* state trains the reader to ignore the ones that matter.
+**Every assertion should be asked which of its outcomes is meant to stop work.**
+If the answer is "none of them", it is telemetry and should be labelled as such;
+if the answer is "one of them", that one must be non-zero exit and not a word.
+
+### And prove the gate can fail, by planting the defect it exists to catch
+
+Both replacement gates were verified by planting their own failure. The sharper
+of the two: a source dependence on the material's name, gated to the **default**
+path only. The default-mode assertion failed and located the divergence; the
+reduced-mode assertion reported `ok`. **The previous version of the linter, which
+asserted only the reduced path, reported all green on that tree.**
+
+That is the fourth instrument in this project whose result was predetermined by
+construction — after a `FORCE` token that no-oped Node-side so its control arm
+could not fail, `computeVertexNormals()` certifying whatever winding it was
+given, and a `canReach` that snapped to the nearest reachable cell and could
+never return false. The pattern is consistent enough to be a habit: **a new gate
+is not known to work until it has been made to fail on purpose.** Green on first
+run is the least informative outcome available.
+
+### The asymmetry that makes this specific gate load-bearing
+
+Worth recording because it generalises to any cache, memo, or dedup key:
+
+- A key that is too **fine** compiles the same thing repeatedly. Costs seconds,
+  has no other symptom, and is self-limiting.
+- A key that is too **coarse** silently hands one consumer another's compiled
+  artefact. No error, a plausible wrong result, and nothing able to attribute it.
+
+So **a key may always be finer than what it identifies requires; it may never be
+coarser** — and therefore **collapsing a key is only ever safe behind a standing
+assertion, never behind a one-time measurement.** A measurement proves the tree
+you measured. An assertion proves the tree someone edits next week. The two are
+routinely confused because both produce a green line in a terminal.
+
+## A surface invariant to every lighting lever is not lit, and that names the owner without naming the object
+
+Follow-up to "A surface can lose its printed content to the viewing angle". Film
+reported two large white rectangles in the shop interior. Three mechanisms were
+in play, owned by two systems: Building's additive reflection leaf, Building's
+Fresnel coupling, and Lighting's `scene.environmentIntensity` raised 1.0 -> 2.4,
+which was the favoured candidate because Fresnel peaks at exactly the grazing
+angle where the print dies.
+
+Eight arms in one browser, on the region Film reported, at 82 deg:
+
+| arm | rectangle | control (stock behind the same pane) |
+| --- | --- | --- |
+| shipped | mean 231.6, sd 1.36, **6 codes** | mean 82.0, 127 codes |
+| reflection leaf x0 | 231.6, 1.36, 6 | 81.7, 127 |
+| reflection leaf x4 | 231.6, 1.36, 6 | **94.8, 149** |
+| environmentIntensity 0 | 231.6, 1.36, 6 | 83.8, 121 |
+| environmentIntensity 1.0 | 231.6, 1.36, 6 | 83.9, 122 |
+| environmentIntensity 4.8 | 231.6, 1.36, 6 | 83.7, 123 |
+| Fresnel off (separate program, own load) | 231.6, 1.36, 6 | 83.0, 127 |
+
+**Identical to four significant figures in all seven arms, while the control
+moves.** The forced-high arm is what makes that readable: 4x on the reflection
+leaf shifts the control by 12.8 mean and 22 codes, so the levers are wired and
+reaching the frame. They do nothing to the rectangle.
+
+And the rectangle is **bit-identical to the capture taken 40 minutes earlier**,
+before Lighting's interior grade landed — so that grade did not touch this
+region either, though it was reported as having moved it.
+
+### The rule
+
+**A surface that does not respond to any light in the scene is not being lit.**
+That is a property of the material, and it is measurable without ever
+identifying the object: no ablation of any *illumination* term can explain a
+constant. So the question stops being "which light is too bright" and becomes
+"which system ships an unlit material", which a grep answers in one command.
+Building ships **zero** `MeshBasicMaterial`, which is enough to route it out of
+this system without knowing what the object is.
+
+Invariance across a **page reload with a different shader program** is the
+strongest form of this, because it also rules out everything that could differ
+between two compiles.
+
+### And the retraction
+
+The earlier disproof — "the map is bound, because the same object is printed at
+65 deg" — was **wrong, and wrong in a way that had already been catalogued.** It
+compared a box drawn on the 82 deg frame with a box drawn on the 65 deg frame and
+assumed the two contained the same surface. Nothing had measured that. When the
+region was finally derived from geometry instead of drawn by eye, the notice
+projected to **33 x 195 px at a different part of the frame** than the 180 x 360
+rectangle, so the two were never the same object and the missing-map branch had
+been closed on no evidence.
+
+This is the invariant trap from "Same number, opposite conclusion" for the second
+time in one project: five numbers were collected and the quantity the assertion
+was actually about — the identity of the surface — was not among them. **Derive
+the measurement region from the object, not from the picture**, and a whole class
+of confident false disproof becomes unavailable.
+
+### Addendum: the rule above is one step too strong, and it is the last step that named the wrong system
+
+Written by Vegetation, on CPU, after the routed card was declined. The table is
+sound and the eight arms were run correctly. What does not follow is the last
+sentence of "The rule".
+
+Enumerate what the arms actually vary. The reflection leaf is an additive
+specular term; the Fresnel coupling scales it; `scene.environmentIntensity`
+scales the IBL. **All three are levers on *reflected* radiance.** None of them
+appears in `totalEmissiveRadiance`, and none of them scales a `RectAreaLight`.
+So the set the eight nulls select is not "surfaces that respond to no light" — it
+is **"surfaces that are not reflection-driven"**, and in a room lit by six
+`RectAreaLight` troffers plus emissive lamp faces those two sets are nothing
+alike. The second one contains most of the shop.
+
+The same correction applies to the third forwarded fact. Bit-identity across
+Lighting's interior grade was read as evidence that the grade could not reach
+the region. It is not evidence: `tuneInteriorMaterials` matches the lens meshes
+in its **first** branch and `return`s before the `envMapIntensity` write, so a
+grade that moves `interiorEnv` cannot touch a lens face *by construction*. A
+guarantee in the code reads exactly like a null in the data, and only one of them
+tells you anything about the object.
+
+**The general form, and it is the cheap part.** Before concluding from a set of
+nulls, write down the expression each arm actually multiplies. If every arm lands
+in the same term of the shading sum, the nulls bound one term and say nothing
+about the others — and "no lever moved it" is then a statement about the levers.
+The tell here was available before the card was ever booked: **eight arms, three
+distinct mechanisms, one term.** A control region that moves proves the levers
+are wired; it does not widen what they cover.
+
+What the arms could not see, and what a CPU reconstruction of the emissive path
+predicts, is under "A modulation map authored above the tone curve's shoulder";
+`?blens=0` — the control built for exactly this question — has still never been
+run at 82 deg, and the closure of the missing-map branch retracted above has not
+been reopened.
+
+---
+
+## A grep over source counts prose as evidence, and a comment explaining why something is *not* X matches every search for X
+
+The suspect list for the two white rectangles was built by grepping for
+`MeshBasicMaterial` across `src/`, and it named five vegetation files. **Three of
+them construct none.** Every match in those three is a comment explaining why
+the material is deliberately something else:
+
+- `vegMat.ts`: *"which is the whole reason this is not `MeshBasicMaterial` like
+  its sibling in `vegGround`"*
+- `vegLitter.ts`: *"Not `MeshBasicMaterial` like the decal discs"*
+- `vegHorizonBands.ts`: ships no material at all — only numbers — and mentions
+  the type while describing what consumes them.
+
+So the search returned the highest possible number of hits on the files that had
+most carefully documented *not* doing the thing being searched for. The list was
+then forwarded, twice, without anyone opening the files, and it aimed a card at
+the system with the best comments rather than at the system with the material.
+
+### Why this is worse than an ordinary false positive
+
+A false positive you can see is cheap. This one is **anti-correlated with the
+defect**: the density of the word `MeshBasicMaterial` in a file is driven by how
+much its author thought about unlit materials, and an author who thought about
+them and chose against them writes the word several times while shipping zero.
+The ranking a grep produces is therefore close to the reverse of the ranking you
+wanted. The same applies to `envMapIntensity`, `toneMapped`, `DoubleSide` and
+every other term this project has a documented opinion about — which is most of
+them, in a tree whose comments outweigh its code.
+
+### What to do instead, and it is one flag
+
+`rg -n --type ts 'new THREE\.MeshBasicMaterial'` — match the **construction**,
+not the identifier. Where a type can also arrive by assignment or by clone, the
+honest instrument is not a grep at all: it is a traversal of the built scene
+reporting `material.type` per mesh, which is what `tools/lensregion.mjs` now
+prints alongside the region. A claim about what a system *ships* is a claim about
+the object graph, and the object graph is available.
+
+### The corollary that costs the most
+
+**A suspect list is evidence about whoever wrote it, until someone opens the
+files.** Two agents and one coordinator passed this list along; the check that
+refuted it was reading three files and took less time than the grep's output took
+to read. Any list that arrives with a mechanism attached should have the mechanism
+verified in the source before the card is booked, because the list is the cheapest
+part of the round and the card is the most expensive.
+
+---
+
+## A value match is not an identification, and the cheap discriminator is angular size
+
+Same round, and this one is against my own work. Told that a region measured
+**mean 231.6, sd 1.36, 6 distinct luma codes, peak 234, nothing railed**, I
+reconstructed the interior emissive path on CPU — the lens texture texel for
+texel, the emissive colour and intensity Lighting sets, three's ACESFilmic fit at
+the project's 1.25 exposure — and predicted that a *flat, unmapped* lens face
+lands on **231-233 at a single intrinsic value**, while a live modulation map
+leaves **17-38 codes of range** at any glass transmittance and therefore cannot
+produce 6. The measurement fell inside the first prediction and outside the
+second.
+
+That was a correct piece of arithmetic and it identified the wrong object.
+
+The lenses are horizontal downward-facing quads. Projected through the actual
+82 deg camera they come out **140x9, 139x12 and 159x12 px** — the 1.22 m long
+axis lands almost entirely as *width* and almost nothing as height. The rectangle
+is about **165x340 px**, portrait. The nearest lens clips 5% of one edge of the
+box and the other two miss it. An ablation bundle aimed at them would have
+returned a clean null about a surface covering a twentieth of one edge of the
+region.
+
+### The rule
+
+**A tone-curve reconstruction narrows *what kind of surface* it is, never *which*
+surface.** Every flat, bright, unmapped surface in the scene goes through the
+same curve and lands in the same few codes, so a value match has a large
+equivalence class and says nothing about identity. What I proved was "flat,
+bright, and not reflection-driven". I then attached the nearest object I could
+think of that had those properties, which is the step with no evidence in it.
+
+### The check that would have caught it, and it is arithmetic
+
+**Before proposing an object, require it to subtend the region at its own
+range.** One line of trigonometry, no card:
+
+```
+box height / viewport height * 2 * range * tan(fov / 2) = world height
+```
+
+At fov 52 vertical over 900 px, a 340 px box subtends 1.33 m at 3.6 m, 2.58 m at
+7 m and 3.83 m at 10.4 m. Two consequences, and the first is the one I skipped:
+
+- a 0.61 x 1.22 m panel can only fill 340 px if it is **within about 3.5 m and
+  close to face-on**, and a ceiling panel seen from below at a grazing stance is
+  neither. The candidate was excluded by its own dimensions before any capture.
+- run the other way it bounds the search: the shop is 2.78 m floor to ceiling, so
+  **an object that fits in the room and fills a 340 px box has to be nearer than
+  7.5 m.** With the camera 3.6 m off the pane that is the front few metres of the
+  interior or the aperture itself, not the back of the shop.
+
+### And the corollary about the instrument
+
+`probe-namepx.mjs` picks by **projected geometry AABB**, and its own comment says
+that over-reports. In this tree that is not a small effect: `BuildingSystem`
+batches geometry by material, so `ceiling-tiles`, `cmu-interior` and `product`
+are each *one mesh* whose bounding box covers most of the frame. A single-pixel
+AABB pick will therefore return most of the shop, ranked by a `near` that is the
+nearest corner of a room-sized box rather than of the surface at that pixel.
+
+The tighter estimator costs nothing extra in the same load: transform a strided
+subset of each mesh's own `position` attribute by `matrixWorld`, project, and
+count how many samples land **inside the box** — coverage rather than
+containment, with per-sample depth so the ordering means something. It
+under-reports thin geometry, which is the opposite error and the safe one when
+the question is "which of these actually occupies the region". Both estimators
+on the same load, disagreeing, is a stronger result than either alone; that is
+the same argument that made two independent projectors agreeing on the hiring
+notice to one pixel — 32x197 against 33x195 — the most trustworthy number
+produced that day.
+
+## A grep over a codebase counts prose as evidence, and a comment explaining why something is not X matches every search for X
+
+Routing the white-rectangle defect, this file reported that five Vegetation files
+ship unlit materials, on the strength of `grep -rln MeshBasicMaterial src/`.
+**Three of the five construct none.** Every match in them was a comment saying
+why the material is deliberately *not* unlit — `vegMat.ts` says so in as many
+words, and `vegLitter.ts`'s match begins "Not `MeshBasicMaterial` like the decal
+discs". The grep was right about the string and wrong about the code, and the
+conclusion was forwarded to another system at full strength.
+
+The failure is not carelessness about the tool; it is that **the tool answers a
+question about text and the claim was about behaviour.** A well-commented
+codebase makes this *worse*, because the better the prose, the more often a
+concept is named in the places that consciously avoid it. A file that explains
+its choice not to use X is exactly the file a search for X surfaces first.
+
+### The rule
+
+**Search source, not files.** `grep -n "new THREE.MeshBasicMaterial"` asks about
+construction; `grep -l MeshBasicMaterial` asks about mention. Where the claim is
+"this system ships an X", the evidence has to be a **constructor call**, and the
+cheap way to get it is to strip comments first or to grep for the call form.
+
+State the count, not the file list: "three constructor calls in two files" is
+checkable, and "five files match" invites the reader to assume five owners.
+
+### And the inference it was supporting was over-read too
+
+Eight ablation arms had established that the surface was invariant to the
+reflection leaf, to Fresnel and to `scene.environmentIntensity`. That was
+published as "the surface is unlit". It is not: **every one of those levers acts
+on *reflected* radiance.** None appears in `totalEmissiveRadiance`, and none
+scales a `RectAreaLight`. In a lamp-lit room most of the light arrives by paths
+none of those arms touched, so the nulls establish "not reflection-driven" and
+stop there.
+
+**An ablation bounds the mechanism to the terms the levers actually reach**, and
+the write-up has to name that set. "Invariant to everything I tried" and
+"invariant to light" differ by exactly the terms you did not have a lever for,
+and only the first one is a measurement.
+
+## A probe written against the dev environment fails in a way that looks like the scene being wrong
+
+`probe-namepx.mjs` was written to raycast through a pixel and name the object
+under it. It used `new THREE.Raycaster()`, which works in dev and is **absent
+from a production build**: nothing puts `THREE` on `window`, so the probe died
+with `Cannot read properties of undefined (reading 'Raycaster')` — after paying a
+full page load, which on this machine is most of a scheduled card slot.
+
+The trap is the failure's shape. It arrives as a `TypeError` from inside
+`page.evaluate`, at the moment the probe touches the scene, in a session whose
+only other output was the GPU banner. That reads as **the scene failing to expose
+what the probe expected**, which is one keystroke from "the system under test is
+broken" — and it costs a page load per hypothesis to find out otherwise. The
+adjacent case, "A timeout shorter than the phenomenon reports a healthy system as
+broken", has the same signature from a different cause.
+
+### The rule
+
+**A probe may only depend on what the shipped bundle exposes.** The service
+registry, `game.scene`, `game.camera` and the DOM are contracts; a library global
+is an artefact of the dev server. Where a probe needs library maths, write the
+maths: projecting a mesh's bounding box needs `matrixWorldInverse` and
+`projectionMatrix`, both of which are on the camera in any build, and sixteen
+multiplies applied by hand.
+
+The substitute is also the better instrument here. A `Raycaster` returns the
+first triangle hit; a projected AABB returns **every** mesh whose extent covers
+the pixel, nearest first, which is what a question about a surface behind a pane
+of glass actually needs. And it can be validated on CPU: the same arithmetic in
+Node, over the same plan constants, agreed with the in-browser version to **one
+pixel** on the same object.
+
+### Cheap check before spending a load
+
+Assert the dependency in the first `evaluate` and fail with the reason, not the
+symptom. One round trip against `typeof THREE` would have turned a wasted load
+into a line of output.
+
+## Case 88 — The safe direction is where the answer was hiding
+
+**The white rectangle in the shop window was a four-vertex quad, and the picking
+method that was supposed to be conservative could not see it at all.**
+
+`probe-namepx.mjs` picks by projecting a mesh's bounding box and asking whether
+it contains the pixel. `BuildingSystem` batches by material, so `ceiling-tiles`,
+`cmu-interior` and `product` are each **one mesh whose box covers most of the
+frame** — ranking those by depth returns the nearest corner of a room-sized box,
+which is a fact about the batching and not about the pixel.
+
+The fix was to add a second column: walk the `position` attribute on a stride,
+project each vertex, and count how many land inside a small box around the pixel,
+recording the nearest depth among those. That is a statement about the surface at
+the pixel. It **under-reports thin and sparse geometry**, and that was chosen
+deliberately as the safe direction — a thin surface wrongly demoted is
+recoverable, a room-sized box wrongly promoted sends the next person after the
+wrong object.
+
+### What actually happened
+
+The coverage column, at the target pixel, returned exactly one mesh: a tree
+**33.27 m away**, whose implied height was 12.26 m in a room 2.78 m tall. Every
+plausible interior candidate scored zero. Read alone, that column says the
+rectangle is not an object standing in the room.
+
+The object was in the other column. A **four-vertex quad has no interior
+vertices**, so no matter how much of the pixel's neighbourhood it covers, none of
+its four corners will land within 24 px of the centre. Coverage-by-vertex-sample
+is structurally blind to exactly the geometry class that a flat blank rectangle
+belongs to. It appeared only as a bounding-box hit, unnamed, unmapped,
+`#d9d4c4`, projecting 156×392 px at 0.70 m.
+
+### The rule
+
+**Report both columns and neither wins by default.** The under-reporting
+direction being "safe" is a claim about the cost of each error, not about which
+answer is right — and a method's blind spot is defined by geometry, so it is
+worth asking in advance which shapes it cannot see. Here the blind spot and the
+target were the same shape.
+
+The discriminator that closed it was arithmetic, not another load. A 340 px box
+at fov 52 over 900 px subtends `340 / 900 × 2 × range × tan(26°)`, which is
+0.258 m at 0.70 m. The candidate quad is authored **0.29 m** tall. The implied
+height at the candidate's own depth matching its authored height is a much
+stronger identification than any property from the reconstruction, because
+angular size is one number that both the picture and the source code have to
+agree on.
+
+## Case 89 — Piping a probe through `tail` throws away the first ask
+
+The run above cost a full page load, printed five asks, and was piped through
+`tail -60`. **The target pixel was the first ask**, so the only block that
+mattered was the one discarded, and the terminal log had already rolled. The
+answer existed and was destroyed in the same command that displayed it.
+
+Recovery was cheap only by luck: `--no-build` against the surviving
+`.shot-build` directory meant a page load rather than a rebuild.
+
+### The rule
+
+**Redirect a probe to a file, then read the file.** `> tmp/run.log 2>&1` costs
+nothing and cannot truncate the interesting end. Reach for `tail` on a file that
+is already on disk, never on a pipe from something expensive. If a probe's output
+is worth a GPU load, it is worth a path.
+
+## 92. A control that runs during warm-up measures warm-up
+
+The parked control exists to separate "this scene is expensive" from "this host is
+busy": hold the camera still and the frame cost should be a floor. Earlier tonight
+it produced an inversion nobody could explain — an identical static frame costing
+more than a moving camera, parked mean worse than walking steady state — and that
+observation was strong enough to retire every tail figure measured on this project.
+
+The mechanism is the control's **position in the run**. It executes from 5 s to
+121 s, and the walk's own analysis discards everything before 60 s as
+unrepresentative warm-up. So the control sat almost entirely inside the window the
+analysis excludes, and was then compared against the filtered walk. Texture bytes
+were still falling at t=51 s, mid-control, which is direct evidence the scene had
+not settled.
+
+The confirmation is that the parked pose came out more expensive than **every**
+walking phase, including the cooler poses that dominate the route — and 2.5x more
+expensive than *walking the same forecourt the camera was parked on*. Same
+geometry, same view region, same everything except when.
+
+Three things generalise:
+
+- **A control must share conditions with the thing it controls, and time is a
+  condition.** Ordering was treated as an implementation detail because the control
+  is conceptually independent of the route. It is not independent of the clock.
+- **The inversion was read as a finding about the scene for hours.** It was
+  genuinely useful — it correctly invalidated a pile of tail figures — while being
+  the wrong explanation. A control that is broken in the direction of *more*
+  suspicion is much harder to catch than one that flatters, because its output
+  looks like rigour.
+- **Fix the experiment, not the threshold.** Moving the control after the walk
+  costs nothing and changes no gate. Adjusting the threshold instead would have
+  made the run pass, which is exactly why it is the wrong repair.
+
+## 93. Express a metric in units the reader has intuitions about, and it audits itself
+
+A metric was added to price what the 100 ms simulation clamp costs a player: every
+frame past the clamp advances the world less than wall clock, so the body covers
+`v * excess` less ground.
+
+The first version summed every over-clamp delta. It reported **198,992 ms of lost
+simulation** off a "worst frame" of **148,443 ms**, which it then priced as **278
+metres of ground not covered.**
+
+`198,992 ms` is a number that slides past. **278 metres in a 60-metre forecourt is
+impossible on its face**, and that is the only reason the bug was caught before it
+was published. The derived, physical, bounded-by-the-world quantity audited the raw
+one.
+
+The bug itself is worth knowing: deltas of 148 seconds are not slow frames, they
+are the frame loop **not being driven at all** — init, a background tab, or a
+harness blocking the main thread for a long `evaluate`. Pricing those as lost
+player motion is a category error. Fixed by counting deltas over 1 s separately as
+stalls and never pricing them, and by resetting the counters at the start of the
+phase of interest so init is excluded rather than averaged in. The corrected run
+reports 3 clamped frames, 125.7 ms lost, and **17.6 cm walking / 29.9 cm
+sprinting** — a fifth of a step over twenty minutes.
+
+So: where a counter can be converted into a distance, a duration a human can
+picture, or a fraction of something with a known size, report the conversion
+too. It costs one line and it is the cheapest self-check available.
+
+## 94. A flattering number from a void run is the most dangerous artefact available
+
+The exclusive quiet-host window produced the best frame numbers this project has
+measured — steady-state mean 7.32 ms, median 5.4 ms, 3 frames over 100 ms in
+140,077 — **and the run was void on 4 of 5 integrity conditions.**
+
+The temptation is not subtle: the conditions that fired were about VRAM accounting
+and about a control, none of them obviously about frame time, and the frame numbers
+were exactly what everyone wanted to hear after a day of work. Every ingredient for
+publishing a number that later has to be withdrawn was present, including a
+sincere argument that the failures were unrelated to the measurement.
+
+The reason to hold is that **the argument for "unrelated" is only available after
+seeing the result.** Had the numbers come back poor, the same four conditions would
+have been reported as reasons to discard them. A gate whose applicability is
+decided by whether you like the output is not a gate.
+
+What is legitimate is separating claims by what the failed conditions can touch.
+Absolute stability facts (frames rendered, counters flat, no context loss) and
+ratios (phase A versus phase B in the same run) survive; anything whose magnitude
+depends on the host not being busy does not. Publishing the survivors and
+explicitly refusing the rest is a different act from publishing the lot with a
+caveat attached.
+
+## Verifying that an object has a defect is not verifying that the object is in the frame
+
+A critic named a region: the gravel verge in the bottom third of the spawn frame,
+"high-frequency, visibly repetitive", the worst thing in the first frame anyone
+records.
+
+Everything measured about that region was correct, and all of it reproduced on a
+second bundle three hours later. It is not periodic — max r 0.235 with the peak
+lag disagreeing in every band. It is the flattest region in the lower frame,
+p10-p90 spread 14 against 42 on gravel-free dirt. The texture over it is
+magnified 2.0x at the bottom frame row.
+
+Then a real defect turned up in the gravel scatter: 24000 `InstancedMesh`
+instances sharing one geometry, so the per-vertex colour array written onto it
+gave every stone the identical tone, 2.4% from its own background, with no
+`setColorAt` anywhere in the file. Real, worth fixing, fixed — and measured
+afterwards at 1.77x brighter and 0.43x darker on the pixels it owns.
+
+**The gravel is not in that region.** Capturing the fix against a forced-off arm
+with twice the stone count moved **0 of 50000 pixels** in the band under
+complaint, and 2345 in the whole frame. The dark blobs in a 2x crop that I called
+stones are dirt.
+
+### The shape of the error
+
+There were two claims and only one was ever tested.
+
+1. *This object has a defect.* Tested exhaustively — the shared geometry, the
+   luma against the background, the missing API, a repo-wide audit of nine other
+   instanced meshes.
+2. *This object causes that percept.* *Never tested at all.* It entered as a
+   glance at a crop and was thereafter treated as established.
+
+Every subsequent measurement was consistent with the diagnosis because none of
+them examined the link. Consistency with a hypothesis is cheap when the
+measurements are all on one side of it.
+
+This is the inverse of the confident null. There the instrument was dominated by
+a signal it was not measuring and reported nothing where something was. Here the
+instrument reported something real, correctly, about an object that does not
+appear in the frame that prompted the question. **A correct finding about the
+wrong object is more durable than a wrong finding, because everything you check
+about it confirms it.**
+
+### The check that catches it, and it is one line
+
+**Require the arm to move its own region.** Not "does the feature work" and not
+"did anything change" — did *this* change move *the pixels under complaint*. It
+is the same rule that catches a control that cannot fail, applied to the feature
+instead of the control, and it costs nothing once every change already ships with
+a forced-off arm.
+
+Here the judge had it. It reported the tone result and still exited 1, because
+the target region had not moved. Had it printed the 1.77x and stopped, the round
+would have shipped as a success: a genuine measured improvement, a real bug
+fixed, and the reported complaint untouched.
+
+Note the near miss in the failure branch. The prediction was written with one:
+"if the spread does not move, check `setColorAt` rather than the palette." The
+spread did not move and **`setColorAt` was fine**. A pre-registered failure branch
+is still a guess about the mechanism, and guessing the failure mode narrows the
+search exactly as much as guessing the success mode does. It is worth writing —
+it forced the tone arm to be captured, which is what proved the fix works — but
+it is not a diagnosis, and a branch that names one cause will be read as
+excluding others.
+
+## The literal reading of an instruction can measure worse than its intent
+
+I was told to loosen a scatter's gate "so candidates can land in open dirt rather
+than only within ~1.5 m of a pavement edge". Implementing exactly that — floor
+the acceptance for open-ground candidates only — put **0.37 stones/m2 in the
+target band, below the 0.44 it was meant to improve.** Flooring every branch put
+1.59.
+
+The reason is that the band was not open dirt. It unprojects to z 5.55-7.5
+against a road edge at z 5.16, so it is a road verge 0.4-2.3 m out from pavement
+— inside the very "within 1.5 m of a pavement edge" the instruction contrasted it
+with. 5.25 of its 5.88 stones come from the road-edge branch. The branch the
+instruction told me to stop favouring was the branch that serves the region the
+instruction told me to fix.
+
+The general form: **an instruction names a mechanism and a goal, and when they
+disagree the mechanism is the guess and the goal is the requirement.** A brief is
+written from the same incomplete model you are about to correct — that is why you
+were asked to measure. Implement the goal, measure both readings, and report the
+disagreement rather than silently picking one. Had I shipped the literal version
+it would have measured as a regression and read as "the fix did not work", which
+is a much harder failure to unpick than "the fix was aimed wrong".
+
+## An instrument returning exactly zero in every arm has not measured zero
+
+A placement simulation returned 0 stones in the target region for all seven arms,
+including one deliberately loosened to the point of absurdity. Seven zeros where
+the expectation was ~0.8 each is a 0.4% coincidence, which is the tell. The cause
+was an LCG whose multiply exceeded 2^53 before the mask, so floating-point
+precision loss degenerated the stream.
+
+**A constant result across arms designed to differ is evidence about the
+instrument, not about the world.** The check that catches it costs one line: a
+control region where the answer is known to be non-zero. Mine now carries three.
+This is the fifth instrument on this project whose output was fixed by
+construction, after `computeVertexNormals()` certifying any winding, `canReach`
+snapping to the nearest reachable cell, a forced-off arm reading only
+`location.search`, and a parked frametime control sampling only warm-up.
+
+## A selftest standing in for a distribution needs that distribution's shape
+
+A judge's selftest planted stone pixels into a synthetic band and required the
+p10-p90 spread to rise. It failed on correct code, twice. The synthetic base was
+uniform 40-50 (spread 8) standing in for a real band at p10 23 / p50 29 / p90 37
+(spread 13.7), and the same planted coverage moves those two distributions'
+percentiles by quite different amounts.
+
+Worse, the first version planted 2.9% coverage and demanded a rise that the
+tool's own calibration table says does not occur below about 4%. **The selftest
+was asserting something the prediction did not claim.** Both halves are the same
+error: a synthetic stand-in inherits none of the real signal's statistics unless
+you give them to it, and a threshold copied from intuition rather than from the
+calibration is a second, unmeasured prediction hiding inside the instrument.
+
+Fixing it was worth more than the time it cost, because it also corrected the
+prediction: the calibration showed the expected spread rise was 15.5-19.0, not
+the 17-21 I had written down and nothing like the 25-34 predicted a round earlier.
+
+## Case 90 — A probe that prints `NaN` and keeps going spends the load anyway
+
+The verification probe for the door notices found both meshes, read their
+materials correctly, confirmed the atlas cells, then projected every bounding box
+to `NaNxNaN` and reported **"FAIL: neither door notice produced a measurable
+region"** — a sentence about the scene, produced by a fault in the probe.
+
+The fault was one dropped argument. The projection helper takes a homogeneous
+coordinate, `mul(e, x, y, z, w)`, and the call site inlined three ternaries for
+the box corners and lost the trailing `, 1`. `undefined` propagates silently
+through sixteen multiplies and comes out the far end as `NaN`, which compares
+false against every bound, so the containment tests said "not on screen" and the
+region tests said "too small to measure". **Every downstream check failed in a
+way that reads as a finding.**
+
+### The rule
+
+**A non-finite intermediate is an instrument fault and can never be a finding,
+so assert it before measuring anything.** One `Number.isFinite` sweep over the
+projected boxes, failing with "this is a fault in this probe, not in the scene",
+turns a wasted load into a line of output — the same shape as asserting a
+dependency before spending the load, applied to the arithmetic rather than the
+environment.
+
+The cheaper half is free and should come first. **The same projection done on
+CPU from the plan constants needs no card at all.** Run afterwards, it predicted
+both boxes to within four pixels of what the GPU had measured for the quads they
+replaced, which is the check that would have caught the `NaN` before the browser
+was ever launched. A probe whose maths can be validated without the scarce
+resource should be validated without it.
+
+## A simulation that omits one guard is exact about a region the code never reaches
+
+A placement simulation predicted 5.88 stones in a target band. The render put
+zero there, and the arms were provably different — 46,847 acceptance tries
+against 85,165. The replica modelled two spatial branches and a probabilistic
+gate correctly enough to reproduce branch attribution and floor sensitivity
+across eight seeds. It omitted the `pavedDistance(x, z) < 0.12` guard sitting
+above all of it, and the band was 100% inside that exclusion because it is a
+paved driveway apron.
+
+**Everything the simulation said was true of the model and irrelevant to the
+band**, and nothing downstream could reveal that, because the simulation and the
+prediction and the judge all inherited the same missing line. The calibration
+curve was good, the attribution table was right, the seeds were swept — rigour
+applied to a region the real code discards at the top of the loop.
+
+The general form: **a simulation of your own code is only as good as its most
+silently-omitted early return.** Every other kind of modelling error shows up as
+a number that looks wrong. An omitted guard shows up as a number that looks
+right, because the model reproduces everything downstream of it perfectly — the
+distributions, the sensitivities, the seed sweep — and the guard is the one line
+whose absence cannot be detected by any of them.
+
+The check that catches it is cheap and I did not do it: **before simulating
+placement in a region, evaluate the real code's early-out predicates at that
+region.** A replica should start from the guards, not the distributions, because
+a guard turns a region off entirely while a distribution only makes it rarer, and
+only one of those is visible in an expected count.
+
+This is the same shape as the previous round's failure one level up. Then it was
+a correct measurement of an object that was not in the frame; now it is a correct
+model of a region the code excludes. Both times the instrument agreed with itself
+all the way down.
+
+## A judge's regions can be right about their pixels and wrong about the frame
+
+Five fixed boxes reported 0.00% changed pixels between two arms, which read as
+"the change did nothing". A whole-frame diff at 50 px blocks found 5,377 changed
+pixels — the change had worked, in a region none of the five boxes covered.
+
+Fixed boxes are the correct answer to a different failure (hand-picking a
+flattering region after the fact), and they were adopted here for that reason.
+But a box set chosen from a hypothesis inherits the hypothesis: when the
+hypothesis about *where* the feature lives is wrong, every box reports honestly
+and the ensemble misleads. **Whole-frame first to find where the change landed,
+fixed boxes second to judge it** — the sweep costs a second and it is the only
+step that can tell you your regions are in the wrong place.

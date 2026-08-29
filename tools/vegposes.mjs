@@ -90,4 +90,33 @@ export const POSES = {
    * to separate under either of the other two.
    */
   underpine: { pos: [-36.0, 0, 16.5], eye: 1.6, look: [-39.5, 0.2, 20.5], fov: 50 },
+  /*
+   * The three standing positions, looking along the highway.
+   *
+   * Added because the far scrub is judged from where a person stops, and the
+   * eight poses above are framing choices — the two that see the far fringe at
+   * all (`horizon`, `approach`) do it from the shoulder or across the country,
+   * not from the forecourt. The user walks freely, so the places to check are
+   * the places there is a reason to stand: the middle of the forecourt, the
+   * pump island, the store door. Those are also the exact coordinates every
+   * density figure in `tools/vegfringe.mjs` is computed at, so a frame and a
+   * table can be put beside each other without a coordinate change in between.
+   *
+   * All three look **along** the road rather than across it, for the same reason
+   * `edge` looks along the seam: the layers under test are a ribbon, and a
+   * ribbon seen end-on recedes through the frame at every distance at once. One
+   * frame then contains the 55-70 m handover band, the 100-190 m stretch of the
+   * fringe sheet, and the 230 m end of the corridor — the three questions on the
+   * capture list are the same pixels at different depths.
+   *
+   * `forecourt` and `storedoor` look -X, `pumpisland` looks +X, so the pair
+   * covers both ends of a scatter that is symmetric in x and neither end is
+   * taken on trust from the other. The sun is on azimuth 203 degrees, toward
+   * -X-Z, so the -X pair is back-lit — which is the harder case for a ground
+   * sheet, since a grazing sun behind the subject is what makes a flat layer
+   * read as paint.
+   */
+  forecourt: { pos: [0.0, 0, 10.0], eye: 1.65, look: [-150.0, 2.0, -6.0], fov: 48 },
+  pumpisland: { pos: [0.0, 0, 18.0], eye: 1.65, look: [150.0, 2.0, -4.0], fov: 48 },
+  storedoor: { pos: [0.0, 0, 30.0], eye: 1.65, look: [-140.0, 3.0, -8.0], fov: 48 },
 };

@@ -27,11 +27,13 @@ import {
   makeLensMap,
   makeSoffitLampMap,
   makeSoffitLightmap,
+  makeUnderDeckField,
   scupperPlan,
   signPlan,
   type CanopyLevels,
   type Scupper,
 } from "../gen/canopyParts";
+import { FORECOURT, groundHeight } from "../site";
 import { makeContactShadow } from "../gen/contactShadow";
 import { TYPE, makeCanopySignAtlas, makeOverflowStain } from "../gen/canopySignage";
 
@@ -169,12 +171,12 @@ const LIGHTMAP_ENV_REFERENCE = 2.4;
  *
  * ## What Lighting needs to know
  *
- * At this sun — 11 degrees elevation, azimuth 203 degrees — the deck's shadow
- * does **not** land under the deck. Light rakes in beneath the drip line from
- * the west-south-west and takes about 23 m of horizontal run to reach the
- * ground, so the whole forecourt under the canopy stays sunlit and the shadow
- * of a 5.99 m deck lands roughly 26 m downsun, across the parking stalls. Two
- * consequences:
+ * At this sun — **6.2 degrees** elevation, azimuth 203 degrees — the deck's
+ * shadow does **not** land under the deck. Light rakes in beneath the drip line
+ * from the west-south-west and takes about 43 m of horizontal run to climb to
+ * deck height, so the whole forecourt under the canopy stays sunlit and the
+ * shadow of a 5.99 m deck lands roughly 55 m downsun, well past the parking
+ * stalls. Two consequences:
  *
  *  - The soffit receives **no direct sun at any elevation**, because sunlight
  *    travels downward and the soffit faces down. Everything it shows comes from
@@ -921,6 +923,59 @@ export class CanopySystem implements GameSystem {
       scuppers: scuppers.map((s: Scupper) => ({ name: s.name, x: s.x, y: s.y, z: s.z, nx: s.nx, nz: s.nz })),
       /** Downpipe outlets at the column feet, and what the ground is like there. */
       discharges,
+    });
+
+    /* ---------------- what lights the ground under the deck ----------------
+     *
+     * Published in response to a report that this deck shadows the whole
+     * forecourt and is why Terrain's tyre scrub delivers zero contrast. Two
+     * things about that turned out to be wrong, and both are recorded here
+     * because a consumer needs to know what this service is and is not for.
+     *
+     * **The deck shadows none of the forecourt.** `SUN.azimuth` is 203.4
+     * degrees, so the 43.5 m reach is displaced 39.9 m in X and 17.3 m in Z,
+     * landing at x 33.3..46.5 — east of the forecourt, which ends at 11.6. Ray
+     * casting every forecourt sample against the deck, the fascia, the four
+     * columns and the store building puts the deck at 0.00% and the columns at
+     * 11.0%, as four streaks. The forecourt is 89% in direct sun.
+     *
+     * **And "soffit bounce" was never a lever on it.** A `lightMap` and an
+     * `emissiveMap` are receiver-side; nothing in a forward renderer carries
+     * light between surfaces, so raising either moves the ground by exactly
+     * zero levels.
+     *
+     * What this service is for is a different and real defect: under the deck
+     * and out on the open apron currently render at the *same* median, because
+     * the ambient is applied unoccluded and the direct term is uniform, so there
+     * is no tonal relationship between the canopy and the ground beneath it at
+     * all. `ambientScale` supplies one — but only just: 0.883 at the drip line,
+     * 0.915 mid-bay, 0.942 on the apron, and 0.5% comparing medians. It will
+     * not rescue albedo detail, and the honest recommendation is that a consumer
+     * reads that number before spending a round applying it.
+     */
+    /*
+     * Terrain's graded height field if it is up, the site function otherwise.
+     * The clear height under the deck is what sets the form factor, so this has
+     * to be the ground the consumer actually renders rather than a nominal
+     * plane — a 60 mm grade error is 1.3% of the height and would be invisible,
+     * but taking the wrong surface entirely would not be.
+     */
+    const groundY = game.tryGet<(x: number, z: number) => number>("groundHeight") ?? groundHeight;
+    const underDeck = makeUnderDeckField(shadeInput, lv.soffitY, groundY, FORECOURT);
+    game.provide("canopy.underDeck", {
+      /**
+       * Multiply your ambient/environment term by this and change nothing else.
+       * Bounded above by 1, so the deck cannot brighten the ground it shades
+       * however it is applied — which two separately-weighted fields can, and
+       * did here on the first attempt at an arbitrary coefficient.
+       */
+      ambientScale: underDeck.ambientScale,
+      /** Diagnostic halves. `ambientScale` already combines them correctly. */
+      skyVisible: underDeck.skyVisible,
+      soffitBounce: underDeck.soffitBounce,
+      /** The rect the bounce grid covers. Outside it the sampler clamps. */
+      rect: FORECOURT,
+      stats: underDeck.stats,
     });
 
     if (force.lightsOn) service.setFixtures(true);

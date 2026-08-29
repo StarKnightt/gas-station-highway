@@ -131,7 +131,7 @@ async function run() {
 
   console.log(`[bloom] loading ${base}`);
   await page.goto(base, { waitUntil: "load", timeout: 60_000 });
-  await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 240_000 });
+  await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 420_000, polling: 500 });
   await assertSceneGpu(page, { tag: "bloom", when: "after ready" });
   await page.evaluate(
     () => new Promise((r) => { let n = 0; const t = () => (++n < 90 ? requestAnimationFrame(t) : r()); requestAnimationFrame(t); })

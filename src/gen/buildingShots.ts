@@ -114,6 +114,22 @@ export const BUILDING_SHOTS: Record<string, BuildingShot> = {
     lookRef: "floor",
     fov: 34,
   },
+
+  /**
+   * The grab beat, from the stance a walked player actually reaches.
+   *
+   * Not a comfortable pose: x/z are the stance `probe-reach.mjs` derives and the
+   * controller stands in, and the aim is the published `GRAB_BOTTLE` position
+   * rather than a point chosen to frame nicely. Pair it with
+   * `?bcoolopen=2&bopen` to get the door leaf open, which is the only state in
+   * which this interaction is ever seen.
+   *
+   * It exists because the largest patch of hard clipping in the whole
+   * deliverable — 5750 px at exactly (255,255,255) — is the cooler liner in
+   * Film's grab still, and no pose this system owned came close to reproducing
+   * it. A defect measured only in another system's frames cannot be A/B'd.
+   */
+  grab: { x: -6.6, z: 37.87, y: 1.62, ref: "floor", lookAt: [-6.6, 0.9, 38.72], lookRef: "floor", fov: 58 },
 };
 
 export const BUILDING_SHOT_NAMES = Object.keys(BUILDING_SHOTS);

@@ -410,7 +410,7 @@ async function run() {
   assertBuildIntact(ROOT, BUILD_DIR, "progaudit", `shot=${SHOT}`);
   const t0 = Date.now();
   await page.goto(`${base}?shot=${SHOT}${QUERY ? `&${QUERY}` : ""}`, { waitUntil: "load", timeout: 90_000 });
-  await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 300_000 });
+  await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 420_000, polling: 500 });
   const readyMs = Date.now() - t0;
   await assertSceneGpu(page, { tag: "progaudit" });
 
@@ -461,7 +461,7 @@ async function run() {
   assertBuildIntact(ROOT, BUILD_DIR, "progaudit", "reload control");
   const t1 = Date.now();
   await page.goto(`${base}?shot=${SHOT}${QUERY ? `&${QUERY}` : ""}&reload=1`, { waitUntil: "load", timeout: 90_000 });
-  await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 300_000 });
+  await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 420_000, polling: 500 });
   result.reloadReadyMs = Date.now() - t1;
   result.reloadShaderTime = await page.evaluate(() => window.__GLSTAT.shaderTime);
   result.reloadPrograms = await page.evaluate(() => window.__GLSTAT.programs.linked);

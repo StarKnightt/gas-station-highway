@@ -1,0 +1,54 @@
+<!doctype html>
+<!--
+  Generates the site overlay and hands its raw bytes back, for asking what the
+  map actually says about a named patch of ground.
+
+  Same reason `asphaltprobe.html` exists: `makeSiteOverlay` paints through a DOM
+  canvas and cannot run in Node. The capture harness is already a browser.
+
+  Driven by `tools/overlayscan.mjs`, which owns all interpretation. This page
+  deliberately knows nothing about channel meanings or world regions.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>site overlay probe</title>
+  </head>
+  <body>
+    <pre id="log">loading…</pre>
+    <script type="module">
+      const log = (m) => {
+        document.getElementById("log").textContent = m;
+      };
+
+      /**
+       * The whole RGBA buffer plus the world mapping, as plain arrays.
+       *
+       * 2048 squared RGBA is a 16 MB structured clone, which is survivable once.
+       * Returning the mapping alongside the pixels matters: the caller asks
+       * about world rectangles, and a probe that returned pixels only would
+       * force the caller to re-derive `OVERLAY_REGION` and could then disagree
+       * with the thing it is measuring.
+       */
+      window.__probe = async () => {
+        const { makeSiteOverlay } = await import("/src/gen/siteOverlay.ts");
+        const ov = makeSiteOverlay();
+        const img = ov.texture.image;
+        const out = {
+          width: img.width,
+          height: img.height,
+          originX: ov.origin.x,
+          originZ: ov.origin.y,
+          sizeX: ov.size.x,
+          sizeZ: ov.size.y,
+          data: Array.from(img.data),
+        };
+        ov.texture.dispose();
+        return out;
+      };
+
+      window.__probeReady = true;
+      log("ready");
+    </script>
+  </body>
+</html>

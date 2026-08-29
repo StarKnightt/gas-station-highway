@@ -29,6 +29,38 @@ export interface SoilDetail {
    * that cannot hold water and no pool uniforms are emitted.
    */
   pools?: { x: number; z: number; rx: number; rz: number; level: number }[];
+  /**
+   * The water depth at which standing water stops showing its dish and starts
+   * behaving as a surface, in metres. Default 0.020.
+   *
+   * This is a property of the *substrate*, not of water, which is why it is a
+   * parameter and not the constant it used to be. What the ramp stands in for is
+   * the substrate's own relief becoming emergent: water thinner than the
+   * aggregate it sits on presents the aggregate's microsurface rather than its
+   * own, so it is damp ground rather than a mirror. On asphalt with 7 mm
+   * exposed aggregate that takes 10 to 20 mm, which is where 0.020 came from.
+   *
+   * On a float-finished concrete slab, whose relief is sub-millimetre, a few
+   * millimetres of water is already a mirror — which anyone who has crossed a
+   * wet car park has seen. Leaving the asphalt figure on concrete is what made
+   * the first pass at the forecourt pools measure 13% and 0% of their area past
+   * the ramp: a slab-panel puddle is 20 to 30 mm deep at its deepest, so the
+   * asphalt ramp consumed the entire depth range of the feature and the pools
+   * would have rendered as damp patches. The number was not wrong; it was
+   * calibrated against a 92 mm lot hollow and reused on a 24 mm puddle.
+   */
+  mirrorDepth?: number;
+  /**
+   * Strength of the drying stain around each pool, 0..1. Default 0, so no
+   * existing surface changes.
+   *
+   * Its own parameter rather than a constant so that it has a forced-off arm.
+   * A damp halo is a soft dark oval on pavement, which is one sign flip away
+   * from the defect a critic has named twice, and it is exactly the class of
+   * feature — meant to be felt rather than seen — that cannot be confirmed or
+   * refuted from a single frame.
+   */
+  stain?: number;
 
   /** Strength of the drainage / disturbance colour organisation. */
   gain?: number;
@@ -77,6 +109,47 @@ export interface SoilDetail {
 
 export interface WorldDetailOptions {
   key: string;
+
+  /**
+   * REDUCED MODE — the compile-time tier hook. `quality.detailPatches === false`.
+   *
+   * WHAT IT IS FOR
+   * --------------
+   * This function generates one shader program per material it touches, and a
+   * cold load on weak hardware is ~92% driver link time. So the tier's lever
+   * here is not per-pixel cost, it is the NUMBER OF DISTINCT PROGRAMS and the
+   * SIZE of each. Reduced mode attacks both: it emits a much smaller body, and
+   * because that body is the same for every material asking for it, the
+   * materials collapse onto a shared program instead of one each.
+   *
+   * **The two tiers optimise opposite things, and that is deliberate.** At high,
+   * specialising per material is right: each one emits exactly the arms it needs
+   * and pays no per-pixel cost for arms it does not. At low, unifying is right:
+   * one slightly more general program that eight materials share links once
+   * instead of eight times. Neither is the better strategy in general.
+   *
+   * WHAT IT KEEPS, AND WHY THOSE AND NOT OTHERS
+   * -------------------------------------------
+   * Kept: `macro` breakup, `antiTile`, and the site `overlay`.
+   *
+   * This is not the cheap subset, it is the subset that protects against the one
+   * failure a low tier is not allowed to have. A whole night of measurement here
+   * established that macro breakup and anti-tiling are what stop the asphalt
+   * reading as a repeating texture, and **a tier that silently drops them looks
+   * broken rather than plain.** Losing subtlety is an acceptable price for a
+   * four-minute load; losing it in a way that reads as a bug is not. The overlay
+   * is kept because it is a single texture lookup and it carries the site's
+   * entire history of use — without it the lot reads as newly laid.
+   *
+   * Dropped: `soil` (and with it the damp film, the pools, the drying stain and
+   * the second dirt material), `wash`, `wheels`, `erode`, `void`. `soil` alone is
+   * ~44% of the injected fragment source, so dropping it is most of the size win.
+   *
+   * The low tier's ground therefore reads as **a dry morning on a used lot**
+   * rather than as the morning after rain. That is a smaller picture, honestly
+   * smaller, and it is a decision rather than an omission.
+   */
+  reduced?: boolean;
 
   /** Very low frequency tiling noise, sampled in world XZ. */
   macro: THREE.Texture;
@@ -211,14 +284,43 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
     directSpec = 1,
   } = opts;
 
+  /**
+   * Reduced mode drops arms by turning their own gates off, rather than by
+   * adding `&& !reduced` to each emission site further down.
+   *
+   * That matters for the reason the uniform table exists at all: every gate here
+   * decides BOTH whether a block of GLSL is emitted AND whether its uniforms are
+   * declared. Suppressing an emission site without suppressing its gate would
+   * declare uniforms nothing reads — harmless — but suppressing a gate without
+   * an emission site would leave GLSL referencing an undeclared uniform, which
+   * is a link failure the type system cannot see and which cost this project
+   * hours twice. Gating at the source keeps the two halves inseparable, and the
+   * existing `assertDeclared` check still covers the result.
+   */
+  const reduced = !!opts.reduced;
+
   const useOverlay = !!overlay;
-  const useWash = !!(overlay && washMap && washGain > 0);
-  const useWheels = !!(wheelPaths && wheelPaths.length && wheelStrength > 0);
-  const useErode = erodeAlpha > 0;
-  const useVoid = !!voidMap;
-  const useAnti = antiTile > 0;
-  const useSoil = !!soil;
-  const useSoilAlt = !!(soil && soil.altMap && soil.altNormalMap && soil.altRoughnessMap);
+  const useWash = !reduced && !!(overlay && washMap && washGain > 0);
+  const useWheels = !reduced && !!(wheelPaths && wheelPaths.length && wheelStrength > 0);
+  const useErode = !reduced && erodeAlpha > 0;
+  const useVoid = !reduced && !!voidMap;
+  /**
+   * There is deliberately no `useAnti` flag, and the compiler enforced it.
+   *
+   * `const useAnti = antiTile > 0;` existed here and was read in exactly one
+   * place: a bit in the program cache key. It gated no emission. `uAntiTile` is
+   * declared unconditionally below and the arm is switched inside the GLSL by
+   * `if (uAntiTile > 0.0)`, so two materials differing only in `antiTile` emit
+   * byte-identical source and differed only in their key — splitting programs
+   * for nothing, since it was written.
+   *
+   * IF YOU MAKE THE ANTI-TILE ARM CONDITIONAL, the key must gain a bit for it or
+   * one ground material will silently render with another's shader. That is not
+   * left to this comment: `tools/shaderlint.mjs` fails, in both tiers, if
+   * `antiTile` ever changes the emitted source.
+   */
+  const useSoil = !reduced && !!soil;
+  const useSoilAlt = !reduced && !!(soil && soil.altMap && soil.altNormalMap && soil.altRoughnessMap);
 
   const wheelVec = new THREE.Vector4(
     wheelPaths?.[0] ?? 1e6,
@@ -287,6 +389,8 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
     U.uSoilWetFloor = { type: "float", value: soil.wetFloor ?? 0 };
     U.uSoilWetBase = { type: "float", value: soil.wetBase ?? 0 };
     U.uSoilViz = { type: "float", value: soil.viz ? 1 : 0 };
+    U.uWaterThick = { type: "float", value: soil.mirrorDepth ?? 0.020 };
+    U.uSoilStain = { type: "float", value: soil.stain ?? 0 };
 
     // Rain shadow. Packed (minX, minZ, maxX, maxZ) rather than the interface's
     // field order, because the shader wants the two mins together to build a
@@ -577,8 +681,56 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
        */
       float wdRim;
 
+      /**
+       * The drying stain around a pool: saturated ground outside the water.
+       *
+       * Separate from wdDamp because it has to survive the rain shadow. The
+       * shelter arm keeps the middle of the forecourt at 30% of the wet base
+       * since a 4.7 m deck is a roof - correct for rain, and wrong for water
+       * that arrived down a downpipe. Without this the pools would sit as bright
+       * water on dry slab with nothing between the two states, which is the
+       * discontinuity that makes a thing read as placed rather than as caused.
+       */
+      float wdStain;
+
       float wdPoolOne(vec4 g, float level, vec3 wpos, float jit) {
         float r = length((wpos.xz - g.xy) * g.zw);
+        // The receding stain, and it is computed before the gate returns because
+        // it lives entirely outside the water.
+        //
+        // A puddle that has been evaporating since first light sits inside a
+        // saturated ring of its own former self, and that ring is the only cue
+        // in this system that distinguishes *drying* from merely wet - which is
+        // the state the brief actually asks for. Standing water alone reads as
+        // "it is raining"; standing water inside a larger dark stain reads as
+        // "it rained last night".
+        //
+        // The outer radius is not a free parameter, and that is what keeps this
+        // out of the decal class. A soft oval on pavement corresponding to no
+        // object is precisely the defect a critic has now named twice, and a
+        // damp halo is the same geometry with the sign flipped.
+        //
+        // So the stain ends at the *dish rim* rather than at a tuned distance.
+        // A puddle drying since first light is stained out to wherever the water
+        // reached when it was full, and it was full to the rim of its dish - so
+        // the stain's outline coincides with a real depression in the slab,
+        // which is a feature the light already responds to independently. There
+        // is nothing to explain away: the mark stops where the ground stops
+        // falling. 1.0 here is the rim, since the gate radii are 1.15x the dish;
+        // the small excess is capillary wicking into the concrete beyond it, and
+        // the wobble is the same field the water level uses so the boundary is a
+        // contour rather than a conic.
+        float haloR = 1.05 + wdWobble(wpos.xz * 0.55 + vec2(7.7, 2.9)) * 0.22;
+        // Gated on the level sentinel, and it has to be. Every other arm here is
+        // made inert on an unused slot by the level being -1e4, because they all
+        // subtract it; the stain is the only term that reads r alone. An unused
+        // slot is (0, 0) with unit radii, so r is just |xz| and a surface passing
+        // near the world origin - the road does - would grow a damp patch there
+        // out of a pool that does not exist. Inert today only because uSoilStain
+        // is zero everywhere except the forecourt, which is a property of the
+        // current callers rather than of this function.
+        float live = step(-1000.0, level);
+        wdStain = max(wdStain, live * (1.0 - smoothstep(0.55, haloR, r)));
         float gate = 1.0 - smoothstep(0.94, 1.06, r);
         if (gate <= 0.0) return 0.0;
         float d = (level + jit) - wpos.y;
@@ -597,6 +749,7 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
           useSoil
             ? `wdDepth = 0.0;
                wdRim = 0.0;
+               wdStain = 0.0;
                float jit = wdWobble(wpos.xz * 0.21) * 0.0040
                         + wdWobble(wpos.xz * 0.73 + vec2(11.3, 4.7)) * 0.0022
                         + wdWobble(wpos.xz * 2.10 + vec2(3.1, 19.4)) * 0.0009;
@@ -755,14 +908,25 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
                // pool. A roof stops rain landing; it does not drain a hollow
                // that is already full, and scaling the pool by shelter would
                // make standing water fade out under cover rather than simply
-               // not being there. In practice no pool is under the deck, so
-               // this is a correctness statement rather than a visible one.
+               // not being there.
+               //
+               // That distinction used to be theoretical - the comment here
+               // said no pool was under the deck - and it is now load-bearing:
+               // both forecourt pools sit at z 23.5..25.7, inside the deck's
+               // 13.1..26.7, because what fills them is a column downpipe
+               // rather than the sky. Water delivered by a pipe does not care
+               // that there is a roof over it.
                float shIn = min(
                  min(wxz.x - uSoilShelter.x, uSoilShelter.z - wxz.x),
                  min(wxz.y - uSoilShelter.y, uSoilShelter.w - wxz.y)
                );
                float shelter = mix(1.0, uSoilShelterK.y, smoothstep(0.0, uSoilShelterK.x, shIn));
                wdDamp = max(w, uSoilWetBase * uSoilWet * shelter * clamp((0.28 + 1.05 * dpatch) * dlow, 0.0, 1.0));
+               // The drying stain, outside shelter for the same reason. This is
+               // the only term here that can exceed the sheltered film, and it
+               // has to be: ground a hand's width from standing water is
+               // saturated whatever the roof is doing.
+               wdDamp = max(wdDamp, uSoilWetBase * uSoilWet * uSoilStain * wdStain);
                return s;`
             : "wdDamp = 0.0; return vec4(0.5, 0.0, 0.0, 0.0);"
         }
@@ -923,7 +1087,7 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
              // which steps at the shoreline, so the reflective arm arrived at
              // 45% of full strength the instant coverage turned on and the pool
              // began with a cut. This is zero at zero depth by construction.
-             float wdDeep = smoothstep(0.0, 0.018, wdDepth);
+             float wdDeep = smoothstep(0.0, uWaterThick * 0.9, wdDepth);
              wdWetAmt = clamp(wdSheen * 0.45 + wdDeep * 0.55, 0.0, 1.0);
              // The fringe is a shoreline, so it keys on standing water only.
              // The residual film has no shoreline - that is what makes it read
@@ -1084,7 +1248,7 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
              // the shoreline, which is a visible hard rim and is most of why
              // the pools read as feathered decals rather than as water. Water
              // zero millimetres deep is wet ground; it has to start there.
-             float rDeep = smoothstep(0.0, 0.020, wdDepth);
+             float rDeep = smoothstep(0.0, uWaterThick, wdDepth);
              roughnessFactor = mix(roughnessFactor, 0.055, rDeep);
              // The saturated rim is rougher than either side, not smoother:
              // it is grit with the air driven out of it, and it is the one
@@ -1190,7 +1354,7 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
           // the substrate's tangent frame, which on a curved pad is not level.
           vec3 wdWaterN = normalize((viewMatrix * vec4(wdRipple(vWDetailPos.xz), 0.0)).xyz);
           normal = normalize(mix(normal, mix(wdGeoNormal, wdWaterN, 0.85),
-                                 smoothstep(0.0, 0.020, wdDepth)));
+                                 smoothstep(0.0, uWaterThick, wdDepth)));
         }
       #endif`;
 
@@ -1270,8 +1434,79 @@ export function applyWorldDetail(material: THREE.MeshStandardMaterial, opts: Wor
     // same flags that decide whether its uniforms exist, so the two cannot drift.
   };
 
+  /**
+   * THE SOURCE BITS: every option that gates an emitted block, and nothing else.
+   *
+   * These, plus `uniformDecls` and the tier, fully determine the injected
+   * source. Nothing below interpolates a numeric option into the GLSL, so every
+   * per-material difference is either a gated block (a bit here) or a uniform
+   * VALUE — and values are not part of a program.
+   *
+   * `useAnti` is deliberately ABSENT, which is the whole point of the list.
+   * `antiTile` gates no emission: the anti-tile arm is always injected and
+   * switched by the `uAntiTile` uniform value. Including it split programs whose
+   * source was byte-identical, and it had been doing so since it was written.
+   * That is measured rather than assumed, and it is now a hard gate:
+   * `tools/shaderlint.mjs` builds two materials differing only in `antiTile`, in
+   * BOTH tiers, and **fails** if the emitted fragment source differs. If someone
+   * later makes the arm conditional, that check turns red instead of the ground
+   * quietly rendering with another surface's shader.
+   *
+   * This was named `reducedBits` while it was reduced-only. It is used at every
+   * tier now, and a name describing a configuration it no longer belongs to is
+   * the same defect class as a stale warning: believed, because it is there.
+   */
+  const sourceBits =
+    `${useOverlay ? 1 : 0}${useWash ? 1 : 0}${useWheels ? 1 : 0}${useErode ? 1 : 0}` +
+    `${wheelViz ? 1 : 0}${useVoid ? 1 : 0}${normalFade ? 1 : 0}${useSoil ? 1 : 0}${useSoilAlt ? 1 : 0}`;
+
+  /**
+   * THE PROGRAM KEY. Source-derived, at every tier.
+   *
+   * three keys programs on this string, so two materials share a compiled
+   * program if and only if they agree here. The two failure directions are not
+   * symmetric, and that asymmetry decides everything about how this is written:
+   *
+   *   too FINE   -> the same shader compiles repeatedly. Costs seconds.
+   *   too COARSE -> one material is silently handed another's compiled program.
+   *                 No link error, no warning, a plausible wrong frame, and
+   *                 nothing downstream able to attribute it.
+   *
+   * So **a key may always be finer than the source requires; it may never be
+   * coarser**, and collapsing one is only ever safe behind a standing assertion,
+   * never behind a one-time measurement.
+   *
+   * The key was `wd:${opts.key}:${flagBits}` — the MATERIAL'S OWN NAME plus the
+   * gates. That is a complete description of the program plus an identity that
+   * cannot affect a single instruction, so it was correct, maximally pessimistic,
+   * and looked like neither. It made every material its own program even where
+   * several were byte-identical.
+   *
+   * Now it is `tier + sourceBits + uniformDecls`, which is a complete
+   * description of the emitted source and nothing else. The declarations are the
+   * other half of what determines the GLSL, so dropping the name loses nothing:
+   * materials whose source is genuinely identical share one program, and
+   * materials differing in any gate or any declaration still get their own.
+   * Being wrong about which materials match now costs a program rather than a
+   * picture.
+   *
+   * The tier is in the key explicitly even though `uniformDecls` already differs
+   * between the two — reduced drops whole uniform blocks — because relying on
+   * that implicitly would make the tiers distinct by accident rather than by
+   * construction. Finer than necessary, which is the safe direction.
+   *
+   * WHY THIS IS SAFE AT HIGH, where the requirement was a no-op: the collapse
+   * changes only which compiled program object several materials point at.
+   * Uniforms upload per material regardless of sharing, and identical source
+   * under one driver is identical pixels by construction. The requirement was
+   * protecting the picture; the picture cannot move. `shaderlint.mjs` asserts
+   * the byte-identity this depends on **in both tiers**, which is the standing
+   * assertion the collapse rests on rather than a measurement taken once.
+   *
+   * Recovers 6 of 193 programs where compilation is ~92% of a ~284 s cold load.
+   */
   material.customProgramCacheKey = () =>
-    `wd:${opts.key}:${useOverlay ? 1 : 0}${useWash ? 1 : 0}${useWheels ? 1 : 0}${useErode ? 1 : 0}${useAnti ? 1 : 0}${wheelViz ? 1 : 0}${useVoid ? 1 : 0}${normalFade ? 1 : 0}${useSoil ? 1 : 0}${useSoilAlt ? 1 : 0}`;
+    `wd:${reduced ? "lo" : "hi"}:${sourceBits}:${uniformDecls}`;
   material.needsUpdate = true;
   return material;
 }

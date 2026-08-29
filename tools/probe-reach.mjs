@@ -953,6 +953,7 @@ async function main() {
          */
         let opened = null;
         let taken = null;
+        const doors = game.tryGet("building.coolerDoors") || [];
         const bottle = probeTargets.find((p) => /bottle/.test(p.name));
         if (window.__INTERACT && bottle) {
           const face = async () => {
@@ -1012,24 +1013,81 @@ async function main() {
            */
           const STANCE_Z = 37.98;
           const standX = bottle.target[0];
+          /**
+           * Drive the controller to the derived stance. A closure because it has
+           * to happen twice: the diagnostic sweep below teleports the camera, and
+           * a teleport does not move PlayerSystem's body — so the walk has to be
+           * redone before the interaction, or the click fires from wherever the
+           * body actually snapped back to.
+           */
+          const goToStance = async () => {
           for (let n = 0; n < 300; n++) {
-            const dx = standX - cam.position.x;
-            const dz = STANCE_Z - cam.position.z;
-            const d = Math.hypot(dx, dz);
-            if (d < 0.12) break;
-            // Steer by looking where we are going, then hold W: the same
-            // controller a player uses, not a teleport.
-            cam.lookAt(cam.position.x + dx, cam.position.y, cam.position.z + dz);
-            if (n === 0) key("keydown", "KeyW");
-            await frame();
-          }
-          key("keyup", "KeyW");
-          for (let i = 0; i < 12; i++) await frame();
-          await face();
+              const dx = standX - cam.position.x;
+              const dz = STANCE_Z - cam.position.z;
+              const d = Math.hypot(dx, dz);
+              if (d < 0.12) break;
+              // Steer by looking where we are going, then hold W: the same
+              // controller a player uses, not a teleport.
+              cam.lookAt(cam.position.x + dx, cam.position.y, cam.position.z + dz);
+              if (n === 0) key("keydown", "KeyW");
+              await frame();
+            }
+            key("keyup", "KeyW");
+            for (let i = 0; i < 12; i++) await frame();
+            await face();
+          };
+          await goToStance();
           sidesteps.push(
             `walked to derived stance (${cam.position.x.toFixed(2)},${cam.position.z.toFixed(2)})->` +
               (window.__INTERACT.probe()?.name ?? "nothing")
           );
+          /*
+           * Sweep the stance and report what the crosshair names at each z,
+           * rather than asserting a band from arithmetic.
+           *
+           * Two stances 10 mm apart gave opposite outcomes, which was read as the
+           * open leaf grazing the sight line. But the leaf that was opened hinges
+           * at x −6.72 and the bottle is at x −6.60, so a *fully* open leaf at
+           * 1.5 rad lies in a thin slab about 110 mm west of the ray and cannot
+           * be on it. Either the leaf is still swinging when the probe fires, or
+           * something else is on that ray.
+           *
+           * So measure both: the door's actual rotation at probe time, and the
+           * crosshair's answer across the whole aisle. A swept interval is the
+           * band; a single pass/fail at one z is not.
+           *
+           * By teleport, because it is pure diagnostics, and therefore it has to
+           * run *before* the take and be followed by a real walk back. Writing
+           * `camera.position` does not move PlayerSystem's body, which snaps back
+           * on the next tick — doing this immediately before a click made the take
+           * fail from a stance whose crosshair had just named the bottle. Running
+           * it after the take instead was worse: the bottle no longer exists, so
+           * every sample reported "nothing" and the band read EMPTY. A diagnostic
+           * that consumes the thing it measures is two faults, not one.
+           */
+          const sweep = [];
+          for (let z = 37.85; z <= 38.45001; z += 0.05) {
+            cam.position.set(standX, eyeAt(standX, z), z);
+            cam.lookAt(bottle.target[0], aimY(bottle), bottle.target[1]);
+            await frame();
+            await frame();
+            const h = window.__INTERACT.probe();
+            sweep.push({
+              z: Number(z.toFixed(2)),
+              names: h ? h.name : "nothing",
+              d: h ? Number(h.distance.toFixed(2)) : null,
+            });
+          }
+          window.__REACH_SWEEP = sweep;
+          window.__REACH_DOORS = doors.map((d) => ({
+            name: d.name,
+            rot: Number((d.rotation?.y ?? 0).toFixed(3)),
+            target: d.userData?.openAngle ?? null,
+          }));
+
+          // Walked, not teleported, because the sweep above moved only the camera.
+          await goToStance();
+          await face();
           // Only click when the crosshair names the bottle. Clicking whatever is
           // under it is how the previous run "took" a cooler door — which is a
           // second toggle, so it closed the door it had just opened and reported
@@ -1061,16 +1119,30 @@ async function main() {
                 for (let i = 0; i < 10; i++) await frame();
               }
               /*
-               * Aim down the bottle's own line, not at the cooler-door target.
-               * The target is the middle leaf of the bank; the leaf that is open
-               * is the one the bottle was behind. Aiming at the target closed a
-               * door three bays away — which is to say it *opened* one, since the
-               * interaction is a toggle, and then reported a success.
+               * Aim at the open leaf itself, computed from its own transform.
                *
-               * Once the bottle has been taken, the next thing on the ray it
-               * occupied is exactly the leaf that was opened to reach it.
+               * Two wrong aims preceded this. Aiming at the cooler-door *target*
+               * closed a leaf three bays away — which, the interaction being a
+               * toggle, means it opened one and reported a success. Aiming down
+               * the bottle's line worked only while the leaves were 848 mm wide
+               * and the hinge happened to sit near that ray; narrowing them to
+               * 668 mm moved the hinge 340 mm west and the crosshair found nothing
+               * at all. Both are the same mistake: aiming at where the leaf was
+               * assumed to be instead of where it is.
+               *
+               * A hinge knows where its own leaf is. `userData` carries the width
+               * and height, the group carries the rotation, so the centre of the
+               * leaf is one `localToWorld` away and is correct at any width and
+               * any open angle.
                */
-              cam.lookAt(bottle.target[0], aimY(bottle), bottle.target[1]);
+              const leaf = doors.find((d) => (d.rotation?.y ?? 0) > 0.05);
+              if (!leaf) break;
+              const lw = leaf.userData?.width ?? 0.6;
+              const lh = leaf.userData?.height ?? 1.6;
+              const lp = leaf.position.clone();
+              lp.set(lw / 2, lh / 2, 0);
+              leaf.localToWorld(lp);
+              cam.lookAt(lp.x, lp.y, lp.z);
               for (let i = 0; i < 6; i++) await frame();
               const h = window.__INTERACT.probe();
               if (h && /cooler|door/i.test(h.kind + h.name)) {
@@ -1092,6 +1164,8 @@ async function main() {
           opened,
           taken,
           sidesteps: window.__REACH_SIDESTEPS || [],
+          sweep: window.__REACH_SWEEP || [],
+          doorAngles: window.__REACH_DOORS || [],
           close: window.__REACH_CLOSE || null,
           finalStand: [Number(cam.position.x.toFixed(2)), Number(cam.position.z.toFixed(2))],
           stalled,
@@ -1117,6 +1191,29 @@ async function main() {
         `${w.finalDistance} m from the target`
     );
     if (w.doorClicks.length) console.log(`        opened on the way: ${w.doorClicks.join(", ")}`);
+    if (w.sweep && w.sweep.length) {
+      console.log("        stance sweep at x = bottle, crosshair target by z:");
+      for (const r of w.sweep) {
+        console.log(`          z ${r.z}  ${r.names}${r.d === null ? "" : ` at ${r.d} m`}`);
+      }
+      const good = w.sweep.filter((r) => /bottle/i.test(r.names)).map((r) => r.z);
+      console.log(
+        good.length
+          ? `        band naming the bottle: ${good[0]} .. ${good[good.length - 1]} = ${(
+              (good[good.length - 1] - good[0]) *
+              1000
+            ).toFixed(0)} mm over ${good.length} samples`
+          : "        band naming the bottle: EMPTY"
+      );
+    }
+    if (w.doorAngles && w.doorAngles.length) {
+      console.log(
+        `        door angles at probe time: ${w.doorAngles
+          .filter((d) => d.rot > 0.01)
+          .map((d) => `${d.name} ${d.rot} of ${d.target}`)
+          .join(", ") || "all closed"}`
+      );
+    }
     if (w.close) {
       console.log(
         `        closed the cooler: ${w.close.closed ? w.close.closed.name : "CLICK FAILED"} ` +

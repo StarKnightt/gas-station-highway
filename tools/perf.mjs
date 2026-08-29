@@ -37,7 +37,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import net from "node:net";
 import { execFile } from "node:child_process";
-import { assertHardwareGpu, assertSceneGpu, launchOptions, isSoftwareRenderer } from "./gpu.mjs";
+import { assertHardwareGpu, assertSceneGpu, launchOptions, launchWarmProfile, isSoftwareRenderer } from "./gpu.mjs";
 import { assertPrivateBuildDir } from "./scratch.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -52,6 +52,8 @@ const arg = (n, d) => {
   const hit = argv.find((a) => a.startsWith(`--${n}=`));
   return hit ? hit.slice(n.length + 3) : d;
 };
+/** `--warm` reuses a persistent profile; see the launch site for why this is opt-in. */
+const WARM_PROFILE = process.argv.includes("--warm");
 const SECONDS = Number(arg("seconds", "45"));
 const DO_BUILD = !argv.includes("--no-build");
 const DO_SYSTEMS = argv.includes("--systems");
@@ -219,7 +221,7 @@ async function loadScene(page, base, query) {
   const t0 = Date.now();
   await page.goto(url, { waitUntil: "load", timeout: 60_000 });
   try {
-    await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: READY_TIMEOUT_MS });
+    await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 420_000, polling: 500 });
   } catch (err) {
     if (page.__problems.length) console.error(`[perf] never ready. Page said:\n    ${page.__problems.join("\n    ")}`);
     throw err;
@@ -297,7 +299,23 @@ async function run() {
     }
   }
 
-  resources.browser = await chromium.launch(launchOptions());
+  // `--warm` reuses a persistent profile so the driver shader cache survives
+  // between runs, turning a 192-349 s cold load into ~21 s.
+  //
+  // Deliberately OPT-IN rather than the default, unlike `stress.mjs`. This
+  // harness *reports* `readyMs` as a headline figure, so warming the profile
+  // silently changes what that number means — from "what a user waits for on
+  // first open" to "what a repeat load costs". Those differ by 10x here, and a
+  // run that quietly swapped one for the other would look healthier and be
+  // wrong. Use `--warm` when init is setup cost; leave it off when init is the
+  // measurement. Either way the profile state is printed next to the number.
+  if (WARM_PROFILE) {
+    resources.context = await launchWarmProfile({ tag: "perf", viewport: { width: WIDTH, height: HEIGHT }, deviceScaleFactor: 1 });
+    resources.browser = resources.context.browser();
+    for (const pg of resources.context.pages()) await pg.close().catch(() => {});
+  } else {
+    resources.browser = await chromium.launch(launchOptions());
+  }
   // A browser that dies takes every subsequent measurement with it and the
   // Playwright error ("Target page, context or browser has been closed") names
   // the symptom, not the cause. Record the moment and the card state instead.
@@ -358,7 +376,7 @@ async function run() {
   await poller;
   const peakInit = initTrack.reduce((a, b) => (b.heapMB > a.heapMB ? b : a), { heapMB: 0, s: 0 });
   out.initHeap = { track: initTrack, peakMB: peakInit.heapMB, peakAtS: peakInit.s };
-  console.log(`[perf] scene ready in ${(readyMs / 1000).toFixed(1)}s   peak JS heap during generation ${peakInit.heapMB} MB (at t=${peakInit.s}s)`);
+  console.log(`[perf] scene ready in ${(readyMs / 1000).toFixed(1)}s (${WARM_PROFILE ? "WARM profile: a repeat-load figure" : "cold profile: a first-open figure"})   peak JS heap during generation ${peakInit.heapMB} MB (at t=${peakInit.s}s)`);
 
   // Settle: let lazily compiled programs and mipmaps land before the snapshot.
   await page.evaluate(() => new Promise((r) => { let n = 0; const t = () => (++n < 60 ? requestAnimationFrame(t) : r()); requestAnimationFrame(t); }));

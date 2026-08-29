@@ -107,7 +107,7 @@ async function run() {
 
   let ready = true;
   try {
-    await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 300_000 });
+    await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 420_000, polling: 500 });
   } catch {
     ready = false;
   }

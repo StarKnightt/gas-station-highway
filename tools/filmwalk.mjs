@@ -47,7 +47,17 @@ import { launchOptions, assertHardwareGpu, assertSceneGpu } from "./gpu.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = path.join(ROOT, "shots", "film");
 const FRAME_DIR = path.join(OUT_DIR, "frames");
-const PORT = 5151;
+// 5151 is this harness's assigned port; `--port N` exists so whoever is
+// scheduling a shared window can move it without editing this file.
+const PORT = (() => {
+  const i = process.argv.indexOf("--port");
+  if (i < 0) return 5151;
+  const n = Number(process.argv[i + 1]);
+  if (!Number.isInteger(n) || n < 1024 || n > 65535) {
+    throw new Error(`--port needs a port number, got ${JSON.stringify(process.argv[i + 1])}`);
+  }
+  return n;
+})();
 // Under this tool's own output directory, not the shared `.shot-build/`, which
 // another agent cleared out from under a --no-build run tonight and turned into
 // a 404 on the page load. Same lesson as the survey file that kept vanishing
@@ -817,7 +827,25 @@ async function main() {
   // happens when AudioSystem arms on the first pointer event.
   const audioPlan = WANT_AUDIO ? await installOfflineAudio(page, FPS) : null;
 
-  await page.waitForFunction(() => window.__SCENE_READY === true, { timeout: 240_000 });
+  /**
+   * Note the explicit `null` in the second position. This previously read
+   * `waitForFunction(fn, { timeout: 240_000 })`, and Playwright's signature is
+   * `(pageFunction, arg, options)` — so the object was consumed as **`arg`**, the
+   * options were left default, and **the real budget was 30 s, not 240.**
+   * Measured, not deduced: the same call with a never-true predicate throws
+   * `Timeout 30000ms exceeded` in that form and at the stated 5 s in this one.
+   *
+   * 30 s is under even a *warm* load under contention, which measured 33 s — so
+   * this was a failure waiting for a busy host, wearing a number that said it
+   * had eight times the margin it had.
+   *
+   * `polling: 500` because the default is rAF, which cannot fire during the
+   * unbroken main-thread block that `Game.start()` is.
+   */
+  await page.waitForFunction(() => window.__SCENE_READY === true, null, {
+    timeout: 420_000,
+    polling: 500,
+  });
   await page.evaluate(() => {
     for (const id of ["hud", "loading"]) {
       const el = document.getElementById(id);
@@ -860,7 +888,13 @@ async function main() {
     // fridge compressor, fluorescent buzz, pump motor — are all started at the
     // context time it holds when it finishes. Let it finish before the clock
     // starts moving, or the beds begin partway into the take.
-    await page.waitForFunction(() => window.__GAME.tryGet("audio")?.ready === true, { timeout: 30_000 });
+    // `null` in the arg position; see the readiness wait above. Here the intended
+    // and effective budgets happened to coincide at 30 s, which is exactly how
+    // this form survives review.
+    await page.waitForFunction(() => window.__GAME.tryGet("audio")?.ready === true, null, {
+      timeout: 60_000,
+      polling: 250,
+    });
     await page.evaluate(() => window.__FILM_AUDIO.begin());
     console.log("[film] audio: graph armed and render clock started at t=0");
   }

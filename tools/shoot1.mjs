@@ -158,6 +158,55 @@ const POSES = {
    */
   walk_store: { pos: [5.0, 0, 20.0], eye: 1.62, look: [-5.0, 1.35, 31.0], fov: 50 },
   walk_sun: { pos: [-4.0, 0, 26.0], eye: 1.62, look: [-11.0, 0.9, 8.0], fov: 50 },
+
+  /**
+   * Along the fuelling lane, past the island, at walking height.
+   *
+   * The third walking pose, and it exists because the first two could not see
+   * the thing I had just changed. Both of them were authored to judge the ground
+   * plane and its wetness, so they look across open forecourt; the tyre scrub and
+   * oil live at the stances, at x within +/-4 and z of 21.25 and 25.15, and
+   * neither pose has a stance in frame. Measuring "the marks do not read" from a
+   * view that cannot contain them is the confident null again, one level up from
+   * the crop that was all broad shading.
+   *
+   * Heading is roughly (+0.99, +0.13), which is close to perpendicular to the
+   * sun bearing. That is deliberate and it is the third distinct lighting case
+   * after the with-the-light and into-the-light pair: cross-lit is where surface
+   * marks show best, being neither washed out by glare nor buried in shadow. If
+   * the scrub does not read here it does not read.
+   */
+  walk_pump: { pos: [-8.5, 0, 19.9], eye: 1.62, look: [7.5, 1.1, 22.0], fov: 50 },
+
+  /**
+   * THE INTERACTIVE SPAWN, reproduced exactly. The first frame anyone records.
+   *
+   * Not authored — DERIVED from the spawn state archived in
+   * `shots/walkprobe-film-0637/run.log`, because Film's verge complaint is about
+   * this frame and a pose that merely resembles it would answer a different
+   * question. `walkprobe.mjs` produces the real thing by letting `PlayerSystem`
+   * spawn with no shot preset, but it overwrites its output and takes no force
+   * token, so it cannot carry a control arm.
+   *
+   * Archived: position (-14.0000, 1.8674, 2.0000), forward
+   * (0.6247, -0.0098, 0.7808), fov 52, pitch -0.559 deg, yaw 38.660 deg.
+   *
+   * `groundHeight(-14, 2)` is 0.2174, so `eye: 1.650` lands on 1.8674 exactly.
+   * `look` is that position advanced 30 m along the archived forward. Verified by
+   * reconstruction: the forward implied by pos -> look matches the archive to
+   * 2.0e-6 per component, pitch -0.562 and yaw 38.662 against -0.559 and 38.660,
+   * the residual being the archive's four printed decimals rather than drift.
+   *
+   * **fov 52 is `Game.ts`'s camera default and must stay 52.** The other poses
+   * here choose a fov to frame a subject; this one is not framing anything, it is
+   * standing where the player stands. A 46 or 50 here would silently change the
+   * regime the complaint lives in — the verge is immediate foreground, the camera
+   * is level to within half a degree, and the bottom frame row is ground at
+   * 3.30 m where one screen pixel spans 8.3 mm. Narrow the fov and that row moves
+   * out, the magnification falls, and the measurement passes while the frame the
+   * user screenshots stays ugly.
+   */
+  spawn: { pos: [-14.0, 0, 2.0], eye: 1.65, look: [4.741, 1.573, 25.424], fov: 52 },
 };
 
 const ALL = Object.keys(POSES);
@@ -249,6 +298,23 @@ function lowerPriority() {
 
 const SHADER_FAIL =
   /program info log|shader error|gl\.getShaderInfoLog|undeclared identifier|VALIDATE_STATUS|THREE\.WebGLProgram/i;
+/**
+ * Warnings that are not failures.
+ *
+ * The pattern above matches "Program Info Log", which is the envelope every
+ * shader diagnostic arrives in — including the benign ones. ANGLE's HLSL
+ * backend emits `warning X4122: sum of 0.996094 and -2.98545e-017 cannot be
+ * represented accurately in double precision` for ordinary constant folding, and
+ * that aborted a round whose frame had already been captured correctly.
+ *
+ * Keeping compile and link errors fatal is right and is not being relaxed. What
+ * is being fixed is the classification: a warning reported as a failure is the
+ * false positive that gets a gate switched off, which is the more expensive
+ * outcome. Anything matching this is logged and not counted; anything that also
+ * says `error` is still fatal, since `error` wins by being checked first.
+ */
+const SHADER_BENIGN = /\bwarning X\d+\b|cannot be represented accurately/i;
+const isShaderFailure = (t) => SHADER_FAIL.test(t) && !(SHADER_BENIGN.test(t) && !/\berror\b/i.test(t));
 // Case-sensitive and word-bounded on purpose: `NaN` and `Infinity` are JS
 // literals with one spelling each, and a case-insensitive substring search for
 // "NaN" matches the middle of "luminance".
@@ -413,6 +479,8 @@ async function main() {
   console.log(`[shoot1] round ${round.id}`);
 
   const written = [];
+  // The program cache is per-context, so it is reported once per run, not per pose.
+  let programsReported = false;
   const failures = [];
   let reported = false;
 
@@ -512,8 +580,94 @@ async function main() {
 
     const stats = await page.evaluate(() => {
       const r = window.__GAME?.renderer;
-      return r ? { calls: r.info.render.calls, tris: r.info.render.triangles } : null;
+      if (!r) return null;
+      /**
+       * The compiled program cache, read here because the page is already
+       * loaded and drawn, so it is free.
+       *
+       * `renderer.info.programs` is three's live cache and each entry carries
+       * the `cacheKey` it was keyed on. That key is the only thing in the
+       * runtime that says WHO owns a program, which is what makes a per-owner
+       * count possible at all — grouped below on the key's leading token.
+       *
+       * Read AFTER the 18-frame settle above, not at scene-ready: programs are
+       * created on first draw, so a count taken early is a count of whatever
+       * happened to have been drawn, and it reads low in a way that looks like
+       * a saving.
+       */
+      const list = r.info.programs;
+      const keys = Array.isArray(list) ? list.map((p) => String(p.cacheKey ?? "")) : null;
+      return {
+        calls: r.info.render.calls,
+        tris: r.info.render.triangles,
+        // null and 0 are different findings: null means the probe never reached
+        // the cache, 0 would mean a drawn frame compiled nothing, which is
+        // impossible and would indicate the read is wrong rather than the scene.
+        programKeys: keys,
+      };
     });
+
+    /**
+     * Per-owner program counts, grouped on the key prefix. Reported once, on the
+     * first shot of the run, because the cache is per-context and does not
+     * change between poses in one browser.
+     *
+     * Grouped by the leading token rather than by a hand-written owner list, so
+     * a system that starts keying programs shows up as a new group instead of
+     * being silently folded into "other".
+     */
+    if (stats && !programsReported) {
+      programsReported = true;
+      if (stats.programKeys === null) {
+        failures.push(
+          `${shot}: renderer.info.programs is not an array. A frame was drawn, so this is the probe ` +
+            `failing to reach the renderer rather than a scene with no programs.`
+        );
+      } else {
+        /**
+         * Group on the CUSTOM key, which three appends to the END of its own.
+         *
+         * The first attempt grouped on the leading token and reported garbage,
+         * because every three cacheKey begins `physical,STANDARD,,highp,...` —
+         * the stock program descriptor. The owner-identifying part, when there
+         * is one, is whatever `customProgramCacheKey` returned, and it is at the
+         * tail.
+         *
+         * Systems that do NOT set a custom key cannot be attributed at all from
+         * here, and they are reported as exactly that rather than bucketed into
+         * a plausible-looking owner. An attribution that invents a denominator
+         * is worse than one that admits a gap.
+         */
+        const OWNERS = [
+          ["wd (applyWorldDetail, Terrain)", /wd:(hi|lo):/],
+          ["veg", /\bveg[:_]/i],
+          ["canopy", /\bcanopy[:_]/i],
+          ["pump", /\bpump[:_]/i],
+          ["car", /\bcar[:_]/i],
+          ["building", /\bbld[:_]|\bbuilding[:_]/i],
+        ];
+        const groups = new Map();
+        for (const k of stats.programKeys) {
+          const hit = OWNERS.find(([, re]) => re.test(k));
+          groups.set(
+            hit ? hit[0] : "unattributable (no customProgramCacheKey)",
+            (groups.get(hit ? hit[0] : "unattributable (no customProgramCacheKey)") ?? 0) + 1
+          );
+        }
+        const wd = stats.programKeys.filter((k) => /wd:(hi|lo):/.test(k));
+        console.log(`[shoot1] PROGRAMS renderer.info.programs.length = ${stats.programKeys.length}   (wd: ${wd.length})`);
+        for (const [g, n] of [...groups].sort((a, b) => b[1] - a[1])) {
+          console.log(`[shoot1] PROGRAMS   ${String(n).padStart(4)}  ${g}`);
+        }
+        // The distinct wd keys, tail-sliced so the custom portion is visible
+        // rather than 96 characters of stock descriptor. A collapse that shared
+        // programs shows as a shorter list here, rather than being inferred from
+        // a total that other systems also move.
+        const distinct = [...new Set(wd.map((k) => (/wd:(hi|lo):[^,]*/.exec(k)?.[0] ?? k).slice(0, 110)))].sort();
+        console.log(`[shoot1] PROGRAMS   ${wd.length} wd programs over ${distinct.length} distinct wd keys`);
+        for (const k of distinct) console.log(`[shoot1] PROGRAMS     ${k}`);
+      }
+    }
 
     const file = await round.save(`${shot}${SUFFIX}`, (dest) => page.screenshot({ path: dest, type: "png" }));
     written.push(file);
@@ -526,8 +680,12 @@ async function main() {
         `(${Date.now() - t0} ms)  bundle ${stamp.text}`
     );
 
-    const shaderProblems = problems.filter((p) => SHADER_FAIL.test(p));
+    const shaderProblems = problems.filter((p) => isShaderFailure(p));
     if (shaderProblems.length) failures.push(`${shot}: shader failure -> ${shaderProblems[0]}`);
+    // Benign shader diagnostics are printed rather than dropped: a warning that
+    // nothing ever mentions is how a real one hides in a familiar shape.
+    const shaderNotes = problems.filter((p) => SHADER_FAIL.test(p) && !isShaderFailure(p));
+    for (const n of shaderNotes) console.log(`[shoot1] ${shot}: shader note (not fatal) -> ${n}`);
     const worldProblems = problems.filter((p) => WORLD_UNSAFE.test(p));
     if (worldProblems.length)
       failures.push(`${shot}: non-finite value reported on the page -> ${worldProblems[0]}`);

@@ -6,6 +6,42 @@ scored the five captures **4/10, FAIL**. Assume you are picking this up cold.
 Owned files: `src/systems/BuildingSystem.ts`, `src/gen/building*.ts`,
 `tools/shoot2.mjs`, `tools/probe-*.mjs`, `shots/system2/`.
 
+## Read this before you write a probe
+
+**A probe whose maths can be checked without the card gets checked without the
+card.**
+
+This is the rule that would have saved the most time on this project, and it
+generalises well past it. The GPU is the scarce resource; projection arithmetic,
+plan geometry, angular size and unit conversion are not. Every one of those can
+be run in Node against the constants in `src/gen/buildingLayout.ts`, for free,
+before a browser is ever launched — and when it is run first, it catches the
+class of bug that otherwise costs a whole load to discover.
+
+It was validated the expensive way. A verification probe projected every bounding
+box to `NaN` because a call site dropped the homogeneous coordinate from
+`mul(e, x, y, z, w)`, and reported **"neither door notice produced a measurable
+region"** — a confident sentence about the scene, produced by a fault in the
+instrument. The same projection done on CPU afterwards predicted both boxes to
+within four pixels. Run first, it costs nothing and the load is never spent.
+
+Three corollaries, each of which also cost a load here:
+
+- **A non-finite intermediate is an instrument fault and can never be a
+  finding.** Assert `Number.isFinite` over anything you are about to measure and
+  fail with "this is a fault in this probe, not in the scene". The danger is not
+  a wrong number, it is a plausible sentence.
+- **Assert your dependencies in the first `evaluate`.** `THREE` is not on
+  `window` in a production build. One round trip against `typeof THREE` beats
+  finding out after the scene loads. Better still, do not depend on it: the
+  camera carries `matrixWorldInverse` and `projectionMatrix` in every build, and
+  sixteen multiplies by hand need no library.
+- **Redirect a probe to a file, then read the file.** `> tmp/run.log 2>&1` costs
+  nothing. Piping something expensive through `tail` discards the head, which is
+  where the first and usually most important ask lives.
+
+Full write-ups are in `NOTES.md`, cases 87 through 90.
+
 ## State of the tree
 
 - `npx tsc --noEmit` passes clean across the whole project as of this handover.
@@ -1874,3 +1910,901 @@ scales all three for the A/B.
 
 Not claimed: that any of the above is fixed, that the interior reads as a
 photograph, or that the slot-access term helps.
+
+## Handover 13: the shop is crossable, and the close beat is on a knife edge
+
+Round `2026-08-29T045056Z-Cu0llQJX` for the look; the reachability work is
+`tools/probe-reach.mjs`, run five times.
+
+### The crossing: fixed, and the diagnosis was in a different place than expected
+
+`GONDOLA_X.x0` moved from −8.2 to **−7.55**, one constant serving both the
+geometry and the blocker, which opens the west corridor from 0.70 m to 1.35 m.
+
+But the premise it was given under does not survive measurement, and the
+correction matters more than the fix. There was **no topological blockage**: the
+direct interior route existed the whole time. What was wrong with it was margin.
+`probe-reach.mjs` now runs a second search — a **clearance-constrained shortest
+path** beside the widest path — because a widest path maximises its tightest gap
+and therefore *prefers a wide detour to a narrow shortcut*. It cannot answer "what
+would a player walk", and the 151-m-for-37-m detour it reported was a fact about
+max-min Dijkstra, not about the shop.
+
+| | before | after |
+|---|---|---|
+| widest-path bottleneck | 0.528 m (doorway) | 0.528 m (doorway) |
+| **direct route tightest** | **0.333 m = 13 mm** | 0.330 m = 10 mm |
+| direct route, door → cooler | stalled at the jamb | **7.67 m for 7.06 m straight, 1.09x** |
+| walked | STALLED 44/55 legs | **arrived 55/55** |
+
+The tightest cell barely moved and the outcome inverted, which is the finding: a
+13 mm margin at a door *jamb* stalls the controller, a 10 mm margin at an outside
+*corner* does not, because a corner-cut has open space either side. **Report the
+margin on the direct route, not the existence of a route.** `NOTES.md` case 57.
+
+The shelving is 0.65 m shorter per run and the `door` pose still reads full — the
+critic's ask was to protect the *density* seen through the glass, and the stocking
+is untouched.
+
+### The full sequence completes on foot, including the close
+
+Walked, on the direct route, one continuous drive of the real controller:
+
+- 55/55 legs, entry door opened once at 1.75 m
+- cooler door 2 opened at 1.36 m
+- walked to a **derived** stance, crosshair named `building-grab-bottle` with no
+  search, **bottle taken at 1.19 m**
+- **cooler closed from the same stance at 1.7 m, no stepping back**
+
+That is the user's third interaction end to end for the first time.
+
+### But the stance band is 220 mm, and that is the real form of the aisle problem
+
+The close beat is not geometrically impossible, and the reason it looked that way
+is that the band is too narrow to land on by choosing a round number. Two
+constraints bracket it from opposite sides:
+
+- gondola run B's north face at z 37.55, so a 0.32 m body cannot stand south of
+  **37.87**
+- an open cooler leaf sweeps z 38.09–38.64, so the same body cannot stand north of
+  **38.09**
+
+**Standable and clear of the leaf is z 37.87 … 38.09 — 220 mm.** My first derived
+stance used 37.70, which reads as "clear of the leaf" and is in fact inside the
+shelving.
+
+And within that band it is a knife edge. Two runs from stances **10 mm apart**
+gave opposite outcomes: at (−6.64, 37.98) the crosshair named the bottle and the
+grab succeeded; at (−6.65, 37.97) it named `cooler-door-2` and the grab failed.
+The ray to the bottle grazes the open leaf's edge. **For the film this is a real
+risk, not a margin** — the beat will work or not depending on millimetres of
+approach.
+
+Widening the aisle is the fix, and it does not fit without a decision above me.
+Pulling run B back in z cuts the A–B shopping aisle from 1.15 m to 0.50 m, and the
+depth available — island north face ≈33.7 to cooler front 38.64, so 4.94 m —
+cannot host two 1.2 m runs plus three usable aisles. The options are **one gondola
+run instead of two**, or **narrower cooler leaves** (more doors, less sweep each).
+Both change the look, so both want a call rather than a unilateral edit. Flagged,
+not done.
+
+### Three harness faults, all of which presented as shop defects
+
+Worth reading before trusting any walk report, mine included. `NOTES.md` case 58.
+
+1. It **re-clicked the entry door** — a toggle with no memory, so it opened, shut
+   and then stalled against a door it had closed itself. Only a direct route
+   lingers at the jamb long enough to re-probe, which is why a session of widest-
+   path walks never showed it.
+2. It **opened cooler doors it merely walked past**, leaving two leaves across the
+   aisle, and the grab then failed. Indistinguishable from an aisle defect.
+3. It **searched for a stance instead of deriving one** — sidestepping until the
+   crosshair found the bottle, wandering five metres, four different numbers, one
+   constant invariant. Case 53 a third time.
+
+All three are fixed: doors are actuated only if named `entry`, only once, and the
+grab stance is now computed from the two bracketing faces. A harness fault and a
+scene fault present identically, and the only discriminator is whether the harness
+did something to the scene it should not have — which is why every actuation is
+logged with its object and distance.
+
+### Note for whoever reads the round
+
+`2026-08-29T045056Z-Cu0llQJX` is not comparable to earlier rounds for shading:
+sky luma 117 against 187, 346 draw calls against 543, 74 programs against 162.
+Lighting is mid-edit — `LightingSystem.ts(641,73)` does not compile as I write
+this — so that round is good for layout and worthless for tone. My own shading
+measurements above stand on the `034227Z` / `034833Z` pair.
+
+---
+
+# Handover 14 — headless construction, and the clipped-pixel routing
+
+No GPU work in this session. The user is walking the build; the cooler captures
+(`--shots=cooler --suffix=-leaf3`) are still owed and should be the first thing
+run when the window opens. Nothing about that harness needs debugging — it was
+killed deliberately.
+
+## 1. `BuildingSystem` now constructs under Node
+
+**Was:** `init` read `location.search`, then `buildMaterials → makeConcrete →
+drawWrappedMask → document.createElement("canvas")`. Every CPU-side tool that
+registered this system died, and a sibling harness worked around it with an
+**empty blocker list** — which over-populated its lot interior without failing.
+
+**Now:** two changes, and one new module.
+
+- **`src/gen/buildingLayout.ts`** owns the plan: `PLAN`, `IN`, `COOLER`,
+  `COUNTER`, `ISLAND`, `GONDOLA_X`, `GONDOLA_Z`, `GRAB_BOTTLE`, `HELD_BOTTLE`,
+  plus `buildingBlockers()`, `buildingFloorHeight()` and `buildingFootprint()`.
+  It imports `BUILDING` and `padY` from `site.ts` and nothing else. **It must stay
+  free of `document`, `window`, `location` and THREE materials** — geometry
+  helpers are fine, rasterisers are not.
+- `BuildingSystem` **imports** that module rather than holding its own copies.
+  There is no second set of literals; `finishedFloorLevel()`, `buildBlockers()`
+  and the published footprint all delegate. This is the ISLAND rule applied to
+  the whole plan.
+- `init` takes a **layout-only path** when `typeof document === "undefined"`
+  (`initLayoutOnly`). It publishes `building.headless`, `building.bounds`,
+  `building.footprint`, `building.blockers`, `building.collide` and
+  `building.floorHeight` — all real — and warns on the console.
+
+**Deliberately not published on that path:** `building.entryDoor`,
+`coolerDoors`, `coolerLightSlots`, `fluorescents`, `exteriorLight`,
+`grabBottle`, `grabbables`, `interiorMaterials`, `root`. Each would have to be an
+empty array, and **a consumer cannot tell "none in this build" from "none because
+there is no canvas"** — that ambiguity is the whole bug. They are absent so
+`require` throws in the tool that had no business needing them. Check
+`building.headless` rather than inferring the mode from what is missing.
+
+`dbg()` and the `q` in `init` now go through a `query()` helper that returns an
+empty `URLSearchParams` when `location` is undefined.
+
+### Tooling, shared
+
+- **`tools/buildinglayout.mjs`** — the plan from Node. `--json` for machine use,
+  `--system` additionally constructs `BuildingSystem` and runs a positive control
+  on collision (a point inside the west wall must be pushed out; a point in the
+  clear corridor must not move). **Consume `--json`; do not copy numbers.**
+- **`tools/ts-resolve.mjs`** — an ESM resolve hook that appends the extension
+  Vite would have. Node 22 strips types already but will not resolve
+  extensionless relative specifiers, so importing anything from `src/` dies on
+  the *second* hop and reads like a broken module. Use
+  `node --import ./tools/ts-resolve.mjs <tool>`; `buildinglayout.mjs --system`
+  re-execs itself with it. **Useful to every agent, not just this system.**
+
+Verified: 12 blockers, floor 0.5739 m, system and module agree on the count,
+collision behaves. `tsc` clean.
+
+**Sibling action:** the `stubBuilding: true` path with the empty blocker list can
+be deleted. Either register the real system (layout-only path takes over
+automatically) or call `buildingBlockers()`.
+
+## 2. The 721 clipped pixels — cannot be reproduced as routed, and what is actually clipping
+
+`tmp/hotpx.mjs` plus a new **`tools/probe-clip.mjs`**, which groups clipped pixels
+into connected clusters and reports each bounding box, aspect, fill and the mean
+colour of the ring just outside it. `721 px` is one number that could be one lamp
+or forty specks; the shape discriminates — compact high-fill is a source, thin
+high-aspect is a specular on an edge, singles are aliasing.
+
+### The routing does not land
+
+`shots/film/frames/` **is empty**. Re-extracted frames 11 and 12 from
+`dawn-station.mp4` (1600×900, 30 fps, 540 frames, so the coordinate frame is
+unambiguous):
+
+- **0 px at exactly (255,255,255)** in either frame — H.264 4:2:0 does not
+  preserve exact channel values, so the mp4 cannot carry this measurement.
+- x 470–640 in the lower third has a **maximum luma of 76**. An encode does not
+  take 255 to 76 over 170 × 300 px.
+- Frame 11 is **under the canopy looking at the pumps; the building is not in
+  shot.** The brightest things in it are the canopy soffit luminaires at luma
+  237–243, y ≈ 180–200 — Canopy's.
+
+So the 721 px is real but was measured in frames that no longer exist. Written up
+as `NOTES` case 69. **To close it I need either the PNG frames kept, or a frame
+index into a file that still exists.**
+
+### What is clipping, measured on the lossless stills that survived
+
+| still | fully clipped | where |
+| --- | --- | --- |
+| `_v-grab.png` | **5750** | cooler interior, x 48–247 y 288–495 (3158 px) and x 272–375 y 530–619 |
+| `_t95-door.png` | 521 | mullion x 1491–1505 y 310–339; push bar x 1481–1599 y 647–710 |
+| `_v-pump.png` | 327 | pump housing edge x 484–499 y 296–327 — **Pumps', not mine** |
+| `_v-door.png` | 197 | same mullion and push bar |
+| `_v-cut.png`, `_peek.png` | 0 | — |
+
+Every cluster is **neutral, in a surround already at 252–255**. Not a warm surface
+railing red first: a region authored or lit to sit at the very top of the curve
+with a few hundred pixels tipping over.
+
+**The door frames are one material.** The mullion and the push bar are both
+`this.mat.alu`, and `alu` was the only material in this file with
+`envMapIntensity` **above 1.0** — 1.1, i.e. reflecting 110% of the environment in
+front of it, authored while the uniform was inert (`NOTES` case 26). Third
+instance of that pattern here. **Landed at 1.0**, labelled in the code as
+CPU-verified only: the pixels are measured, the attribution to this constant is
+not, because separating it from the reflected radiance needs an A/B. Profiling
+down the band (y 160 → 560) shows the brightness peaks at y 260–360 rather than
+running uniformly, so it is a specular lobe and not a flat env wash.
+
+**The bigger number is the cooler, and it is the interior over-brightness already
+routed to Lighting.** 5750 px in the grab frame — 8× the routed figure, in the
+user's third specified interaction — is the white cooler liner and the stock
+against it. `mat.coolerLiner` carries `emissiveIntensity: 0.22` with a comment I
+wrote saying it was *"kept low so the liner does not blow out to paper white and
+swallow the silhouettes of the bottles standing against it."* It is now
+measurably doing exactly that. **Not tuned blind**: whether that is the liner's
+own emissive, the interior ambient (my 0.99× asymmetry, p50 181 against 82) or
+`tuneInteriorMaterials` overwriting a value needs one ablation, and that is GPU.
+
+### Queue when the GPU window opens
+
+1. `--shots=cooler --suffix=-leaf3` — the narrower-leaf captures, still owed.
+2. Ablate `alu` 1.1 → 1.0 against the door approach. Note the `--ab=` harness has
+   a **118 px noise floor**; 521 px should move clearly.
+3. Ablate the cooler liner emissive against the interior ambient, **with
+   Lighting**, since one of the two owns it and both change the same pixels.
+
+---
+
+# Handover 15 — the cooler liner decomposed, and it is not mine
+
+Rounds: **`2026-08-29T055943Z-DbgQgsX3`** (liner and bounce arms) and
+**`2026-08-29T060748Z-DP_qPeDs`** (lamp sweep, door). Cost unchanged throughout:
+**566 draw calls, 6911k tris, 148 programs, 126 textures, 387.44 MB (building
+99.66 MB)** on `cooler`; 472/144 on `grab`. **No new shader programs** — every
+lever added this session scales an existing uniform or moves the camera, because
+program count is now a first-load cost.
+
+Running concurrently on the GPU: Film, the boot agent and Vegetation (22
+node/chrome processes, listeners on 5119 and 5163 that are not mine). My port
+5112 is clear.
+
+## The finding: 91% of it is one Lighting-owned lever, and my term is inert
+
+`grab` is a **new pose** (`src/gen/buildingShots.ts`) at the stance
+`probe-reach.mjs` derives — x −6.6, z 37.87, aiming at the published
+`GRAB_BOTTLE` — plus **`?bcoolopen=2`**, a new flag that swings the leaf a walked
+player opens. It exists because no pose this system owned came within reach of
+the defect, and *a defect measured only in another system's frames cannot be
+A/B'd*.
+
+One build, one browser, arms back to back. Pixels over luma 235, of 170,315:
+
+| term | owner | effect |
+| --- | --- | --- |
+| liner `emissiveIntensity: 0.22` | **mine** | **+117 px (0.07%)** |
+| `?ibounce=0.35` room bounce | Lighting | 1,341 px (0.8%) |
+| `?lamp=0.5` | Lighting | −53,064 px (31%) |
+| `?lamp=0.25` | Lighting | −155,821 px (91%) |
+
+Fully-clipped pixels track it: `any channel at 255` goes **11,412 → 724 → 323**
+across the lamp sweep, and is **identical to the pixel** between `?bliner=0` and
+`?bliner=1`.
+
+**My double-count hypothesis was wrong.** I predicted the emissive was a second
+copy of the three `RectAreaLight`s at 7.0 that `lightInterior.ts` now aims into
+the cabinet. It is worth 0.07%, because the liner sits on the flat top of the
+tone curve where a small additive term has nowhere to go — case 42 from the other
+side, written up as `NOTES` case 71.
+
+**Retired anyway, at `emissiveIntensity: 0.22 * 0`**, with the measurement beside
+it and `?bliner=1` to restore. Not because it cost radiance but because a value
+that models nothing and measures nothing is one somebody later tunes in good
+faith. **I did not touch the albedo** (`0xbfc7cc`, ~0.78, physically right for a
+white liner) — compensating locally for another system's lamp is the class of fix
+this file spent the previous session removing.
+
+### For Lighting
+
+Your cooler tubes are the blowout. Three `RectAreaLight`s at `7.0 * lampGain`
+aimed back into the cabinet, onto a 0.78-albedo liner, put that surface on the
+flat top of the curve — and the products in front of it lose their silhouette,
+which is the subject of the user's third specified interaction. At `?lamp=0.5`
+the bottles visibly recover colour and separation; at `0.25` the frame is
+plausibly a lit cooler.
+
+Two caveats I cannot resolve from here, which is why this is a handover rather
+than a change:
+
+- **`?lamp=` is not a cooler-only lever.** It scales the ceiling troffers and
+  their uplight as well, so 31% and 91% are upper bounds on the cooler tubes'
+  share. The pose is filled by cooler interior, so most of it is theirs, but
+  splitting them is yours.
+- **You have two interior/exterior light changes in flight at once** — this and
+  Terrain's forecourt-shadow lever. Do not land both without knowing about the
+  other; the interior/exterior contrast is the deliverable here, and both move it.
+
+My own earlier interior numbers (0.99× vertical-contrast asymmetry, p50 181
+against 82) still stand as targets and are unaffected by anything in this round.
+
+## `alu` — landed on principle, does not clear the clip, dropped
+
+`envMapIntensity` 1.1 → **1.0** stands: 1.1 was authored while the uniform was
+inert (`NOTES` case 26) and is a surface reflecting 110% of what is in front of
+it. But the `door` pose at 1.0 still shows **1167 clipped px**, including a
+149-px-tall vertical edge highlight at x 1119–1145 (mullion) and a 45-px
+horizontal one at x 775–819 (push bar). A 9% cut was never going to clear a
+specular that is 2 codes over. **Dropped as instructed** — it is glimpsed in
+passing, and the remaining fix is roughness or exposure, neither of which is worth
+the window.
+
+## Harness work, shared
+
+Three faults, all of which presented as scene or build problems:
+
+- **`READY_TIMEOUT_MS` was 120 s against a ~280 s cold load.** A healthy build
+  reported "never became ready" with an **empty page console**, which reads
+  exactly like a shader link failure. Now 420 s, and `polling: 500` instead of
+  the default rAF, which is throttled when four agents share a GPU (`NOTES` 54).
+  Measured: first page **221–244 s**, every subsequent page **20–25 s**.
+- **`--ab=<query>` ported from `shoot3.mjs`.** Repeatable. All arms from one
+  build, one server, one browser — which removes sibling drift *and* pays the
+  ~262 s shader compile once instead of once per arm. Six captures in 355 s
+  against ~1500 s as separate runs.
+- **`--shots=grab,cooler` silently returned one capture** and a round that passed
+  its own completeness check, because the harness holds a hand-written
+  `ALL_SHOTS` and filters against it. Unknown names now exit 2 and print the
+  known list. `NOTES` case 72; same shape as case 68 in a tool.
+
+`NOTES` case 70 documents `tools/ts-resolve.mjs` under the exact
+`ERR_MODULE_NOT_FOUND` text an agent will paste into a search.
+
+## Queue
+
+1. **Interior products against the corrected ambient** — still untouched, and the
+   grab frame shows why it is worth doing: at `?lamp=0.5` the packaging reads as
+   pastel candy-stripe rather than product. Judge after Lighting moves the lamps,
+   not before, and **add no material variants** (program count is a tier lever
+   for Perf's quality scaling).
+2. **The 89 px masonry repeat**, when the coursing audit clears.
+3. `_v-grab.png` had 5750 fully clipped where my `grab` pose has 0 at the same
+   nominal state. Both are 1600×900 and the still is ~2.5 h old, so the tree is
+   not the difference — the pose is. If the film's exact camera is wanted as a
+   preset, Film owns those numbers and I will take them.
+
+---
+
+# Handover 16 — the transmission tier hook
+
+Rounds **`2026-08-29T062036Z-DleyK9V-`** (grab, three arms) and
+**`2026-08-29T062735Z-DleyK9V-`** (held bottle, two arms).
+
+## What it gates, and what it deliberately does not
+
+`ctx.quality.transmission`, read once in `init` into `this.transmissionAllowed`
+and baked into the materials — one program per tier, not a variant per call site.
+
+**The only two transmissive materials this system owns are the handheld bottle's
+`heroShell` (1.0) and `heroLiquid` (0.94).** The storefront glazing, its inner
+leaf and the cooler doors are already `transmission: 0` and have been since the
+black-rectangle fix: they carry transmittance through *alpha* with a black diffuse
+and reflection through a separate additive leaf.
+
+**So the "low tier windows go opaque or black" risk does not exist here**, and
+that is a consequence of the earlier compositing separation, not luck. The
+shopfront is byte-identical at every tier. Worth knowing if anyone reasons about
+this file from the tier table rather than the source.
+
+**What the low tier's bottle looks like was decided, not discovered.** Dropping
+transmission to zero on a `color: 0xffffff` shell would have produced a solid
+white plastic bottle. Instead the shell keeps `transparent: true` and drops to
+`opacity: 0.62` (`heroLiquid` to 0.5), which reads as **frosted PET**: neck and
+shoulder translucent, cap visible through the wall, label fully legible, 0 clipped
+pixels. Plainer, not broken. `opacity` is a uniform, so this costs no program.
+
+## Measured, on the `grab` pose, one build and one browser
+
+| arm | programs | draw calls | triangles |
+| --- | --- | --- | --- |
+| high (default) | 144 | 472 | 6,908k |
+| **`?bgtrans=0`** (this hook alone) | **138** | **369** | **4,959k** |
+| `?tier=low` (whole tier) | 138 | 369 | 3,200k |
+
+Held pose (`bottle` + `?bgheld=1`): **145 → 139 programs, 442 → 321 draw calls,
+6,748k → 4,798k triangles.**
+
+**Six programs, and 103 draw calls and 1.95M triangles** — 22% of the calls and
+28% of the triangles in that frame, from two materials on a 200 mm object.
+`transmission > 0` makes three.js re-render the whole scene into a transmission
+target, so the cost is a second copy of *everything else* and scales with scene
+complexity rather than with the transmissive material. **The flag was justified on
+cold-load compile time and is worth more per frame than per launch.** `NOTES`
+case 73.
+
+Note `?tier=low` and `?bgtrans=0` give the **same 138**, so this hook is currently
+the entire program-count delta of the low tier in this pose — the other three
+owners' hooks are not landed yet.
+
+## No-op at high, proved
+
+`grab-tier.png` from this round is **byte-identical** — md5
+`fac1fe7e3b114f1e2f31af3d5dbb602b` — to `grab-lamp.png` from
+`2026-08-29T060748Z-DP_qPeDs`, a bundle built **before this hook existed**. Not an
+unchanged mean, not a passing health check: identical bytes across two bundles.
+
+## `?bgtrans=0` is the isolated arm, and why it exists
+
+`?tier=low` moves shadow map size, world capture and detail patches at the same
+time, so a program drop under it cannot be attributed to one hook. `?bgtrans=0`
+forces the low branch of this flag alone, tier unchanged. Keep it — it is what
+makes any future claim about this hook checkable.
+
+**One trap for whoever writes the next hook:** the first attempt measured
+**137 programs on both arms** and looked like a clean null. The pose did not
+contain the hero bottle, so neither material was ever compiled. A feature flag is
+only measurable in a frame that would have used the feature, and the false null
+reads exactly like a flag that did not bind.
+
+---
+
+## Handover 17 — the two white rectangles are angle-dependent, not unmapped
+
+Diagnosis only. **No material was changed** (Lighting has the cooler lamp work
+in flight and asked to be consulted first). CPU only; the card was never taken.
+
+### The verdict on the routed question
+
+Film offered two causes. **It is neither.**
+
+- **Not exposure.** `tmp/hotpx.mjs` over both rectangles: **0 px** at
+  (255,255,255), **0 px** with any channel at 255, peak luma 234. Whole frame
+  has 3599 clipped px but `tools/probe-clip.mjs` clusters them all as thin
+  high-aspect strips (16x184, 110x9, 123x4) on the mullion and push bar — not
+  the rectangles.
+- **Not a missing map, and not a regression from the headless split.** The same
+  object is **fully printed at 65°** (`glass-65.png`, legible "NOW HIRING /
+  APPLY WITHIN") and printed from inside (`at-wall.png`) — same capture session,
+  same build, after the `buildingLayout.ts` split. A null map cannot bind at 65°
+  and vanish at 82°. The canvas guard is exonerated by evidence already on disk.
+
+The objects are the **window notices** (`window-notice`, `mat.notice`, taped
+inside the glass at `sfZ + 0.012`), foreshortened by the 82° view into portrait
+rectangles.
+
+### What is actually happening
+
+Content loss to grazing-incidence reflectance, measured by distinct luma codes:
+
+| region | mean | sd | distinct codes |
+| --- | --- | --- | --- |
+| notice @65° | 178.6 | 39.65 | **163** |
+| notice @82° | 231.6 | 1.36 | **6** |
+| shelving behind same pane @65° | 120.2 | 33.21 | 230 |
+| shelving behind same pane @82° | 108.2 | 29.52 | 160 |
+
+The control is the point: **the darker surfaces behind the same glass keep their
+contrast.** Only the near-white notice, already high on the tone curve, runs out
+of slope. This is NOTES case 42 reached via viewing angle rather than emitter
+intensity, and is written up as **case 87**.
+
+### The mechanism is NOT yet attributed — do not fix it blind
+
+The obvious story is the additive reflection leaf. **It is refuted by my own
+table:** a uniform additive term cannot raise the notice's mean +51 while
+lowering the shelving's by 12. Two candidates remain, both in my glazing:
+
+1. the reflection leaf washing out a bright surface, or
+2. the pane at 82° mirroring something bright over that region.
+
+**The ablation that separates them (needs the card, ~6 min, one bundle):**
+
+```
+node tools/walkprobe.mjs --port=5112 --query=bglrefl=0     # kills the additive reflection leaf
+node tools/walkprobe.mjs --port=5112 --query=bgfres=0      # kills the Fresnel coupling
+node tmp/clip/flat.mjs shots/walkprobe/glass-82.png 1240 300 70 180 "rect A core"
+```
+
+If rect A's distinct-code count recovers from 6 under `bglrefl=0`, it is mine and
+local. If it stays at 6, the notice's own shading is the subject and it belongs
+with the interior light work.
+
+**`tools/walkprobe.mjs` writes to a fixed `shots/walkprobe/` and will overwrite
+Film's frames.** They are archived at `shots/walkprobe-film-0637/` — case 69's
+rule applied to someone else's evidence. Copy any new arm out before re-running.
+
+### Third item in the same report, and it is a different defect
+
+The "smaller blank panel near the bollard" measures **105 distinct codes**,
+sd 19.85, nothing railed. It is not blank; it is low-contrast. That is a
+legibility repair, not a binding or exposure one, and it should not be folded
+into the rectangles.
+
+### Corroborated, not mine
+
+`inside-shop.png` and `at-wall.png` both show a floor and shelving with no cast
+shadow anywhere, consistent with Film's ambient-lit reading and with the 0.99x
+vertical-contrast asymmetry already routed to Lighting.
+
+### New shared tooling
+
+- `tmp/clip/flat.mjs <png> x y w h [label]` — luma spread and **distinct-code
+  count** for a region. The distinct-code count is the statistic that separates
+  "no map" from "map compressed into the shoulder"; mean and sd do not.
+
+---
+
+## Handover 18 — all three candidates refused; the rectangle is unlit and is not Building's
+
+One bundle, rebuilt (not `--no-build`) against Lighting's landed interior grade.
+Card released to Perf. Eight arms, one browser, three page loads.
+
+### The result
+
+At 82 deg, on the region Film reported, the rectangle reads **mean 231.6,
+sd 1.36, 6 distinct codes, 0 railed — identical to four significant figures in
+every arm**: reflection leaf at 0x / 1x / 4x, `scene.environmentIntensity` at
+0 / 1.0 / 2.4 / 4.8, and Fresnel off as a separate program on its own load.
+
+The control (stock behind the same pane) moved in the same arms — the 4x
+reflection arm shifts it 12.8 mean and 22 codes — so **the levers are live and
+reach the frame.** They do nothing to the rectangle.
+
+- **Building's reflection leaf: refuted.**
+- **Building's Fresnel coupling: refuted.**
+- **Lighting's `environmentIntensity` 2.4x: refuted.** Four values spanning 0 to
+  4.8 give byte-identical output. This is the number Lighting is waiting on: the
+  multiplier is not the cause, and no change to it will fix this.
+- **Lighting's interior grade did not move this region.** The rectangle is
+  bit-identical to Film's capture from 40 minutes earlier, pre-grade.
+- The physical-clipping null is also out: **nothing is railed**, peak 234.
+
+### What it is instead, and why it is not mine
+
+A surface invariant to every illumination term is **not being lit**. Building
+ships **zero `MeshBasicMaterial`** (`grep -rn MeshBasicMaterial src/systems/BuildingSystem.ts
+src/gen/building*.ts` is empty), so the owner is elsewhere. Files that do ship
+unlit materials: `vegDistant.ts`, `vegGround.ts`, `vegLitter.ts`,
+`vegHorizonBands.ts`, `vegMat.ts`, `contactShadow.ts`, `CarSystem.ts`,
+`lightInterior.ts`, `lightSky.ts`.
+
+`vegDistant.ts` is the strongest candidate on its own documentation — unlit
+bands, colour authored directly, and a critic quote in the file describing a
+"flat fill of near-uniform value, no internal detail of any kind". Note also that
+`stubBuilding: true` is **still live** in `tools/vegfringe.mjs` and
+`tools/_vegscale-entry.ts`, which is the empty-blocker path that over-planted the
+lot interior.
+
+**The decisive next arm is one load:** `?skip=vegetation`, then re-measure the
+box. `Game.ts` validates unknown system names, so a typo fails loudly. If the
+rectangle survives, sweep `?solo=` across the unlit-material owners above.
+
+### Retraction
+
+Handover 17's disproof of the missing-map branch — "the same object is printed at
+65 deg" — **is withdrawn.** It compared a hand-drawn box on the 82 deg frame with
+a hand-drawn box on the 65 deg frame and assumed both contained the same surface.
+When the region was derived from geometry, the window notice projects to
+**33 x 195 px in a different part of the frame** than the 180 x 360 rectangle.
+The two were never the same object, so the missing-map/unlit branch was closed on
+no evidence. Written up in NOTES under "A surface invariant to every lighting
+lever is not lit".
+
+The notice itself, measured properly, is healthy: **141 distinct codes at 82 deg,
+155 at 45 deg.** There was never a defect there.
+
+### Tooling
+
+- `tools/probe-glazeablate.mjs` — arms share one browser; only a *program* change
+  costs a reload. `envMapIntensity` and `scene.environmentIntensity` are live
+  properties, so 6 of 8 arms need no load at all. **Derives its measurement
+  region from the object's own geometry** by projecting it to screen (no `THREE`
+  on `window` in a production build, so the matrices are applied by hand).
+  Carries a forced-high control per lever, a darker control region in every arm,
+  and a pose control against Film's frame.
+- `tmp/clip/flat.mjs <png> x y w h [label]` — distinct-code count for a region.
+
+### Two harness faults worth propagating
+
+- The previous revision's lever-live check asked whether the forced-high arm moved
+  **the region under test**, and so announced "INSTRUMENT DEAD" while the control
+  region was plainly responding. A lever-live check must pass on *any* region.
+- `?lforce=noenv` zeroes the env binding outright, so this file's "no reflection
+  leaf found" guard aborted that arm. The `environmentIntensity 0` arm covers the
+  same ground; the guard needs an opt-out rather than a fix.
+
+### Still open, unchanged
+
+The bollard panel at 105 distinct codes is low-contrast, not broken — noted and
+left, per instruction. `GRAB_BOTTLE` and the cooler leaf untouched pending
+Interaction's pick-priority rule.
+
+---
+
+## Handover 19 — the lens map is alive, and the lens cannot be the rectangle anyway
+
+CPU only, no card. Two answers.
+
+### 1. The troffer lens map binds. There is no dead map.
+
+Traced end to end in the shipping browser path:
+
+| link | state |
+| --- | --- |
+| `makeTrofferLens()` | builds 96 x 192, two tubes at u 0.27/0.73, `g` from ~0.04 at the flange to 1.00 at tube centre — deep, and well below the 0.4 shoulder |
+| assignment | `map: trofferLensTex` **and** `emissiveMap: trofferLensTex`, on a dedicated material instance, not shared with the wall pack |
+| gate | `dbg("blens", 1) !== 0` — **on by default**; non-numeric throws |
+| geometry | `buildingQuad(hw-0.02, hl-0.02, "-y")` -> `THREE.PlaneGeometry`, which always emits full 0..1 UVs. No degenerate UV rect. |
+| upload | `opaqueTexture` returns a `CanvasTexture` with `needsUpdate = true`, `SRGBColorSpace`, mips, aniso 8 |
+| headless split | `init` has exactly **one** `typeof document === "undefined"` guard, at line 260, which returns before `buildMaterials` at line 289. Nothing in the material path is conditional on `document`. **No regression from that work.** |
+
+So the missing-map branch, reopened for the lens, closes again — this time on the
+construction, the slot, the UVs, the upload flag and the gate, rather than on an
+inference.
+
+### 2. The box `1240,300,70,180` contains none of the three candidates
+
+`tools/probe-project82.mjs` — new, CPU-only, imports `buildingLayout.ts` and
+projects with the matrices written out by hand. At the 82 deg stance
+(eye `-6.96, 2.22, 31.10` -> look `-3.40, 2.22, 31.60`, fov 52, 1600x900):
+
+| object | projected | covers the box |
+| --- | --- | --- |
+| `troffer-diffuser` x3 on screen | **140x9, 139x12, 159x12 px** | 5%, 0%, 0% |
+| `troffer-diffuser` x3 off screen | — | 0% |
+| `window-notice[hiring]` | 32x197 at (881, 398) | 0% |
+| `cooler-liner` | off screen right, x 1892 | 0% |
+| `sign-plate[exit]` | off screen right, x 1537 | 0% |
+
+**Nothing contains the box centre (1275, 390).**
+
+**The projector is validated against the live scene**: it puts
+`window-notice[hiring]` at 32x197, and the in-browser geometry projection in
+`probe-glazeablate.mjs` measured 33x195. Two independent implementations, 1 px
+apart.
+
+**The troffer lens is geometrically incapable of being this object.** It is a
+horizontal quad facing -y; at 82 deg off the storefront normal it is seen
+nearly edge-on and delivers a **9-12 px tall band**. The rectangle is ~165x340 px.
+This holds whatever the lens map does, so it is independent of the map question
+above — and it means an ablation of `lensGain` would be measuring a surface that
+occupies 5% of one edge of the box at best.
+
+### Where the object actually is
+
+The ray through the box centre, direction (0.815, 0.058, 0.576), crosses the
+storefront plane `z = 31.6` at **x = -6.25, 1.70 m above the finished floor** —
+inside the door opening (`doorX0 -6.575`, `doorX1 -5.425`) — then runs on into the
+shop at y 2.28 -> 2.92 m, passing *above* the gondola tops and the cooler.
+
+Building's flat-panel inventory in that corridor is exhausted: notices, vinyl,
+plates, liner, troffers, all projected and all elsewhere. Naming it needs one
+raycast, not an ablation.
+
+### Tooling ready for whoever next has the card
+
+`tools/probe-namepx.mjs` — reports every mesh whose projected bounding box covers
+a given pixel, nearest first, with material, `map` dimensions, `emissiveMap`
+presence and **`mapUploaded`** (a `CanvasTexture` whose `needsUpdate` was never
+set samples white and looks exactly like a flat face). **Deliberately not a
+`Raycaster`:** `THREE` is not on `window` in a production build, and the first
+revision of this file spent a page load discovering that. It now projects AABBs
+with hand-written matrices and needs no library. One load, no extra arms.
+
+### Corrections to Handover 18, both mine
+
+- The five-file `MeshBasicMaterial` list was a grep over **prose**; three of those
+  files construct none, and their matches are comments explaining why the
+  material is deliberately not unlit. Written up in NOTES under "A grep over a
+  codebase counts prose as evidence".
+- "The surface is unlit" was over-read. All eight arms were levers on *reflected*
+  radiance; none touches `totalEmissiveRadiance` or a `RectAreaLight`. The nulls
+  establish **"not reflection-driven"** and nothing more. Also
+  `tuneInteriorMaterials` returns early on the lens branch before the
+  `envMapIntensity` write, so bit-identity across Lighting's grade was guaranteed
+  by that function rather than being evidence.
+
+## Handover 20 — The pixel is named, and it is ours
+
+**(1275,390) at the 82° stance is a blank paper notice taped to the *outside* of
+the entry door leaf, 0.70 m from the eye.** Source is
+`BuildingSystem.buildEntryDoor`, the loop at lines 1801–1809:
+
+```ts
+for (const s of [
+  { x: 0.3,  y: 1.55, w: 0.21, h: 0.29, r: 0.04,  c: 0xd9d4c4 },
+  { x: 0.63, y: 1.36, w: 0.15, h: 0.2,  r: -0.07, c: 0xcac2ae },
+]) {
+  const p = buildingQuad(s.w, s.h, "-z");
+  p.rotateZ(s.r);
+  p.translate(s.x, s.y, -0.009);
+  door.add(new THREE.Mesh(p, this.signMaterial(s.c)));
+}
+```
+
+`signMaterial` is `MeshStandardMaterial({ color, roughness: 0.94, metalness: 0,
+side: DoubleSide })` — **no map, ever.** One call site, so no other surface is
+affected.
+
+### Both rectangles, both notices
+
+| rect | pixel | projected bbox | depth | authored size | implied h at that depth |
+| --- | --- | --- | --- | --- | --- |
+| A | 1275,390 | 156×392 px | 0.70 m | 0.21 × 0.29 m | 0.297 m at 392 px |
+| B | 1085,570 | 58×189 px | 1.06 m | 0.15 × 0.20 m | 0.206 m at 189 px |
+
+**Two notices in the source, two rectangles in the frame, and for each one the
+height implied by its own projected box at its own depth matches its authored
+height to under 4%.** That is the identification; everything else is
+corroboration.
+
+### Why every property from the reconstruction follows
+
+`buildingQuad(w, h, "-z")` faces −z, and −z is **outside**: the push bar is at
++0.055 and the pull handle at −0.062, and the comment on line 1781 fixes push as
+inside. The notices sit at −0.009, on the outward face, facing out. So they are
+**sky-lit paper, not shop-lit paper**, which is why they were invariant to every
+interior lighting lever — that invariance was never evidence of an unlit
+material, it was evidence that we were measuring an exterior-facing surface with
+interior controls. Flat, bright, not reflection-driven, and unresponsive to the
+shop: all four fall out of "near-white paper facing an overcast sky, with no map,
+at 0.70 m".
+
+They are also physically wrong. `buildingSignage.ts:567` describes the notice set
+as "the taped paper notices on the **inside** of the glass", which is where shop
+notices go. These two are on the wrong face.
+
+### Price, not yet spent
+
+The atlas we need already exists and is already resident: `this.noticeSheet`
+(1024², four cells, `applySheetCell` for UV remap) and `this.mat.notice`, both
+confirmed alive in this run at the 65° stance.
+
+- **A0 — move them inside the glass.** Flip the facing to `+z` and the offset to
+  `+0.009` on the push side. **Two edits.** No new texture, no VRAM, no draw-call
+  change. Removes the sky-lighting independently of the blankness, so it is worth
+  doing whatever else happens. Risk: they end up behind the door glass, which is
+  correct but will dim them.
+- **A1 — give them printed content from the existing atlas.** `applySheetCell`
+  plus `this.mat.notice` in place of `signMaterial`, sized from the cell aspect
+  like the window notices are. **~8 lines**, no new texture, no VRAM, same two
+  draw calls (they must stay children of `door` to swing with the leaf, so they
+  cannot join the batch). `signMaterial` and `signCache` become dead and can go.
+  **Risk: all four atlas cells are already used by window notices**, so two
+  flyers would appear twice in one frame — at 0.70 m and 2.10 m, which may read
+  worse than blank.
+- **A2 — add two cells for the door.** The 1024² sheet is already fully divided
+  into four quadrants, so this means either halving cell resolution or going to
+  2048² (4 MB → 16 MB RGBA on that sheet). **~60–90 lines** in
+  `buildingSignage.ts`. The correct answer, and the only one that avoids visible
+  duplication.
+- **C — recolour only.** Two numbers. Stops the blown-white read and leaves a
+  flat blank rectangle at 0.70 m, which at 392 px is still the worst thing in the
+  frame. Not a fix.
+
+**Recommendation: A0 + A1 now, A2 when there is time to author art.** A0 alone is
+two edits and strictly reduces the defect. Nothing is applied — the instruction
+was to price before making, and I would rather this be chosen than assumed.
+
+### Retractions this closes
+
+`window-notice` was wrong (Handover 18): those are the mapped 1024² quads at
+2.10 m, a different object, and they are fine. The troffer lens was wrong
+(Handover 19). Neither Vegetation nor Lighting owns any part of this.
+
+## Handover 21 — A0 and A1 landed, A2 refused
+
+Both edits are in `buildEntryDoor`, replacing the `signMaterial` loop:
+
+```ts
+for (const s of [
+  { cell: "tabs", x: 0.3, y: 1.55, w: 0.21, r: 0.04 },
+  { cell: "community", x: 0.63, y: 1.36, w: 0.15, r: -0.07 },
+]) {
+  const p = buildingQuad(s.w, s.w / this.noticeSheet.aspect[s.cell], "-z");
+  applySheetCell(p, this.noticeSheet.cells[s.cell]);
+  p.rotateZ(s.r);
+  p.translate(s.x, s.y, 0.009);
+  const m = new THREE.Mesh(p, this.mat.notice);
+  m.name = "entry-door-notice";
+  door.add(m);
+}
+```
+
+**A0 is the sign on the offset, and it is one character.** `-0.009` to `+0.009`
+puts the paper on the interior surface; the facing stays `-z` so the print still
+reads out through the pane. That is the storefront convention exactly — the
+window set sits at `sfZ + 0.012` facing `-z` — and it is what
+`buildingSignage.ts` already claimed the notice set did.
+
+**Checked before making it, because A0 could have hidden them instead of fixing
+them.** The leaf frame is stiles at x 0..0.055 and 0.975..1.030, top rail from y
+2.02, bottom rail to y 0.26, so the glazed opening is x 0.055..0.975 by y
+0.26..2.02. Notice A spans x 0.195..0.405, y 1.405..1.695; notice B spans x
+0.555..0.705, y 1.26..1.46. Both are wholly over glass, so moving them behind
+the pane leaves them visible rather than putting them behind an aluminium rail.
+The pane is at `-0.004` and the notices now at `+0.009`, 13 mm clear, and the
+leaf boxes span `±0.025` only where there is no glazing — no z-fighting either
+way.
+
+### The two cells, chosen in two words
+
+`tabs` and `community`, because their storefront twins are the two furthest from
+the door: `tabs` at x −7.4 is behind the forecourt sightline and `community` at
++0.9 is six metres the other way. `hiring` (−4.9) and `card` (−4.52) sit just
+right of the door and would have put the same flyer twice within a metre.
+
+The aspects made this free rather than a compromise: `tabs` is 0.72 and
+`community` 0.78, against quads authored at 0.724 and 0.75. Deriving height from
+the cell aspect moves notice A by 2 mm and notice B by 8 mm, so the elevation is
+unchanged and the projected-size arithmetic from Handover 20 still holds.
+
+**`signMaterial` and `signCache` are deleted** — that loop was the only call
+site. `tsc --noEmit` clean. No new texture, no VRAM, no new draw calls; the two
+meshes stay children of `door` so they swing with the leaf and cannot join the
+static batch.
+
+### A2 refused
+
+Not proposing it again. 4 MB to 16 MB on one sheet, after the last scheduled
+measurement, on a tree whose crash history is VRAM exhaustion, to avoid a
+duplication that is physically correct — and halving cell resolution to avoid
+the VRAM would trade the blemish for a worse one. The duplication is what a real
+station looks like; the person with the tape had a stack.
+
+### Verification, one load, queued third
+
+`tools/probe-noticeprint.mjs`. One stance (82 deg), one screenshot, no arms.
+Regions are the projected bounding boxes of the meshes named
+`entry-door-notice`, inset 6 px, never boxes chosen off a picture — that
+substitution is what cost the previous round. Asserts the distinct luma code
+count comes off the blank baseline of 6, reports the unchanged `window-notice`
+set in the same frame as a control, and checks that (1275,390) and (1085,570)
+fall inside a door notice box so the measurement is tied to the original
+complaint.
+
+**It also tests the one way A0 could fail.** Moving paper behind glazing at 82
+deg risks trading a blank rectangle for print drowned in the pane's reflection.
+The railed-pixel fraction separates those: codes off 6 with more than half the
+region railed is reported as PARTIAL, not PASS, because print that exists and is
+clipped is a different defect from a blank quad and must not be signed off as
+the same fix.
+
+### Verification load spent, and lost to my own probe
+
+The run reached the scene and then projected every bounding box to `NaN`: the
+call site dropped the homogeneous coordinate from `mul(e, x, y, z, w)`. Fixed,
+plus a finite-check that now fails with "fault in this probe, not in the scene"
+before any pixel is read. Recorded as NOTES.md "A probe that prints `NaN` and
+keeps going spends the load anyway". The card was released cleanly.
+
+**What the spent load did establish, page-side and unaffected by the bug:**
+
+- **Two meshes named `entry-door-notice` exist in the built bundle.** The edit
+  compiles, ships and survives the production build.
+- **Both carry the 1024² notice atlas, uploaded**, not a flat colour. The blank
+  material is gone from those quads.
+- **The UV cells are the two intended ones** — `[0.5,0.5,1,1]` is `tabs` and
+  `[0.5,0,1,0.5]` is `community` — so `applySheetCell` bound the cells asked for.
+- The four `window-notice` meshes still hold `hiring`, `card`, `tabs` and
+  `community`, unchanged.
+
+**And what CPU projection then established for free**, from the plan constants
+with no card:
+
+| mesh | predicted box | depth | previously measured, as blank quads |
+| --- | --- | --- | --- |
+| `entry-door-notice[tabs]` | 152×379 at (1188, 390) | 0.71 m | 156×392 at 0.70 m |
+| `entry-door-notice[community]` | 55×187 at (1062, 597) | 1.07 m | 58×189 at 1.06 m |
+
+Both land within four pixels of the rectangles they replace, which confirms A0
+and A1 moved the paper by millimetres and not by metres. `(1085,570)` falls
+inside the `community` box. `(1275,390)` sits 11 px outside the `tabs` box as
+projected here, and this projection deliberately ignores the 0.04 rad tape-skew,
+which widens that edge by about 15 px — so it is inside once the rotation the
+real mesh carries is applied.
+
+**The cell choice is also confirmed, for free.** At the 82 deg stance
+`window-notice[tabs]` is *entirely behind the camera* and
+`window-notice[community]` projects to 2×40 px at x 730, 7.74 m away. Neither
+duplicate is anywhere near its door twin in this frame, so the duplication cannot
+read as a repeated texture from the stance the complaint was made from.
+
+**What is still unmeasured is the pixel claim**: distinct codes off the blank
+baseline of 6, and whether the pane's reflection at 82 deg drowns the print — the
+one way A0 could trade a blank rectangle for a worse defect. The probe is fixed,
+guarded and ready; it is one stance, one screenshot, no arms. **Not taking a
+second load without being told to.**

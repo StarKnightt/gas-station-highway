@@ -8,7 +8,7 @@ import { DRIVEWAYS, PAD, ROAD, BUILDING } from "../src/site";
 
 export const site = { ROAD, PAD, DRIVEWAYS, BUILDING };
 
-export function sites(densityScale = 1) {
+export function sites(densityScale = 1, seed = 2718) {
   // Mirrors the `blocked` predicate built in VegetationSystem.init, with the
   // building footprint the BuildingSystem publishes at runtime.
   const structures = [
@@ -29,11 +29,12 @@ export function sites(densityScale = 1) {
     [12, -9.6],
     [64, -9.6],
   ];
-  return scatterScrub(ground as never, blocked, anchors, densityScale).map((s) => ({
+  return scatterScrub(ground as never, blocked, anchors, densityScale, seed).map((s) => ({
     x: s.x,
     z: s.z,
     kind: s.kind,
     size: s.size,
     tall: s.tall,
+    wide: s.wide,
   }));
 }

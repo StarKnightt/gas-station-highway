@@ -25,7 +25,7 @@ import { build } from "vite";
 
 await build({ configFile: "tools/vegcpu.vite.config.mjs" });
 const M = await import("../.shot-build/cpu/vegmat.mjs");
-const { makeMatField, buildMatSheet, scatterSprigs, thatchSprigGeometry, makeSoilField, DRIVEWAYS, PAD, ROAD } = M;
+const { makeMatField, buildMatSheet, makeRoadFringeRegion, scatterSprigs, thatchSprigGeometry, makeSoilField, DRIVEWAYS, PAD, ROAD } = M;
 
 const soilField = makeSoilField();
 const soil = {
@@ -119,7 +119,61 @@ const sheet = buildMatSheet({ soil, blocked, ground, centre: [CX, CZ], radius: R
 const sprigs = scatterSprigs({ soil, blocked, ground, centre: [CX, CZ], radius: 42, budget: 7000, seed: 8821 });
 const sprigGeo = thatchSprigGeometry();
 const sprigTris = sprigGeo.index.count / 3;
+
+/* ---- 4. the road fringe, which is the same sheet over a different shape ---- */
+// The region comes from `vegMat`, not from a copy of it written here: this tool
+// exists to disagree with the system, and it cannot disagree about a shape it
+// defines itself.
+const FRINGE_REACH = 190;
+const FRINGE_OUT = 15;
+const region = makeRoadFringeRegion({
+  halfPaved: ROAD.halfPaved,
+  reach: FRINGE_REACH,
+  out: FRINGE_OUT,
+  handoverCentre: [CX, CZ],
+  handoverRadius: R,
+});
+const fringe = buildMatSheet({
+  soil,
+  blocked,
+  ground,
+  centre: [0, 0],
+  radius: FRINGE_REACH,
+  extent: { halfX: FRINGE_REACH, halfZ: ROAD.halfPaved + FRINGE_OUT + 4 },
+  pitch: 1.9,
+  seed: 4409,
+  region,
+});
+console.log(`\nroad fringe — the continuous layer past the near sheet's ${R} m disc`);
+console.log(`  ${fringe.kept}/${fringe.cells} cells kept (${((fringe.kept / fringe.cells) * 100).toFixed(1)}%), mean cover ${fringe.meanCover.toFixed(3)}`);
+// Kept cells per 10 m of road, which is the number that says whether it is
+// continuous. A mean over the whole ribbon can be healthy with a 40 m hole in
+// it, and a hole is the defect being fixed.
+{
+  const per = new Map();
+  const step = 1.9;
+  for (let x = -FRINGE_REACH; x <= FRINGE_REACH; x += step) {
+    let w = 0;
+    for (let z = -ROAD.halfPaved - FRINGE_OUT - 4; z <= ROAD.halfPaved + FRINGE_OUT + 4; z += step) {
+      if (blocked(x, z)) continue;
+      w += region(x, z) * field.cover(x, z);
+    }
+    const k = Math.floor(x / 20) * 20;
+    per.set(k, (per.get(k) ?? 0) + w);
+  }
+  const keys = [...per.keys()].sort((a, b) => a - b);
+  console.log(`  weighted cover per 20 m of road (region x cover, summed across the ribbon):`);
+  let holes = 0;
+  for (const k of keys) {
+    const v = per.get(k);
+    if (v < 1) holes++;
+    console.log(`    ${String(k).padStart(5)}..${String(k + 20).padStart(4)}m  ${v.toFixed(1).padStart(7)}  ${"#".repeat(Math.min(44, Math.round(v)))}`);
+  }
+  console.log(`  ${holes} of ${keys.length} twenty-metre stretches carry effectively nothing (<1)`);
+}
+
 console.log(`\nbill`);
 console.log(`  sheet : ${sheet.kept}/${sheet.cells} cells kept (${((sheet.kept / sheet.cells) * 100).toFixed(1)}%), ${sheet.triangles} triangles, 1 draw call`);
+console.log(`  fringe: ${fringe.kept}/${fringe.cells} cells kept (${((fringe.kept / fringe.cells) * 100).toFixed(1)}%), ${fringe.triangles} triangles, 1 draw call`);
 console.log(`  sprigs: ${sprigs.length} instances x ${sprigTris} tri = ${sprigs.length * sprigTris} triangles, 1 draw call`);
-console.log(`  total : ${sheet.triangles + sprigs.length * sprigTris} triangles, 2 draw calls\n`);
+console.log(`  total : ${sheet.triangles + fringe.triangles + sprigs.length * sprigTris} triangles, 3 draw calls\n`);

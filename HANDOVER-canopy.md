@@ -359,3 +359,156 @@ can, so the two details want opposite faces. At 90° the scuffs land on faces no
 car can reach. Instance yaw still does real work here — `applyGrime` samples
 object space, so two orientations are enough to stop four instances carrying
 byte-identical dirt.
+
+---
+
+## Round: the forecourt-contrast request, and why the answer was "not mine"
+
+A request arrived to raise soffit bounce, on the grounds that this deck shadows
+the whole forecourt and is why Terrain's tyre scrub delivers zero contrast. Three
+findings, all CPU-verified under a GPU hold, none requiring a capture.
+
+**1. The deck shadows none of the forecourt.** `SUN.azimuth` is 203.4 degrees, so
+the anti-sun direction in XZ is (0.918, 0.397) and the 43.5 m reach is displaced
+**39.9 m in X, 17.3 m in Z**. The shadow lands at x 33.3..46.5, z 30.4..44.0; the
+forecourt ends at x 11.6. Ray casting all 8775 forecourt samples puts the deck at
+**0.00%** and the four columns at **10.97%** together. The forecourt is 89% in
+direct sun. The reported reach was right; it was applied along +Z.
+
+Also note that a 6.2 degree sun under a 4.72 m deck penetrates 43.5 m
+horizontally against a 13.2 m deck depth, so **a low sun lights the ground under
+this canopy right through to the far side.**
+
+**2. Soffit bounce was never a lever on the ground.** `lightMap` and
+`emissiveMap` are receiver-side; there is no light transport between surfaces in
+`WebGLRenderer`. `setLampBounce` and `setLightmapIntensity` move the soffit's own
+pixels and the ground by zero. Had the knob been turned and the frame
+re-measured, the null result would have been indistinguishable from a broken
+control.
+
+**3. The physically correct replacement also does not deliver.** Built the real
+second bounce — soffit exitance integrated over the deck with the parallel-plate
+form factor `h^2/(pi r^4) dA` — and exact deck solid-angle occlusion of the
+ambient. Individually strong: the bounce field ranges 10.7x. **Summed, spread
+across the deck footprint is 3.4%, flatter than the 7.3% it was meant to fix**,
+because occlusion is deepest exactly where the view of the soffit is best. A 0.82
+albedo ceiling returns nearly what it intercepts. That is why canopies are white.
+
+The real cause of median 41 at 7.3% spread is arithmetic nobody had written out:
+
+```
+  direct   sun 4.4 x sin(6.2 deg) 0.108  ->  0.475
+  ambient  env 2.4, one constant colour  ->  2.400
+  ambient : direct = 5.05 : 1
+```
+
+Ambient-dominated by 5:1, and the ambient is a constant. Measured tonal
+spread from the lighting terms alone over the open apron: **0.0%**. Under the deck
+25.9%, all of it the four column streaks. **The region is flat because its
+dominant term is uniform, so level is not the lever — structure is.**
+
+### What was published anyway, and its honest amplitude
+
+`canopy.underDeck` with a single `ambientScale(x, z)`, because the first version
+exposed `skyVisible` and `soffitBounce` separately and the free coefficient
+between them let the deck *brighten* the ground it shades at the arbitrary 0.42
+used while testing. Combined as `skyVisible + albedo * (1 - skyVisible) * shape`
+it is bounded above by 1 by construction.
+
+It fixes a different, real defect: under the deck and out on the apron currently
+render at the *same* median, so there is no tonal relationship between the canopy
+and the ground beneath it at all. Amplitude, stated in the service so a consumer
+reads it before integrating: **0.883 at the drip line, 0.915 mid-bay, 0.942 on
+the apron.** 6.3% point to point, **0.5% median to median.** The shape is the
+interesting part — an inverse vignette, darkest at the perimeter, because at the
+drip line you have lost 29% of the sky but see less soffit than from mid-bay.
+
+Recommendation to a consumer: do not spend a round on it for contrast. It is
+correct, cheap and small.
+
+### Shared tooling added
+
+`tools/probe-shadowsource.mjs` — names the occluder shadowing a region, and the
+fraction, by ray cast rather than displacement arithmetic. Takes `--rect`. Add a
+conservative AABB for your geometry; too-big boxes over-report, so
+`shadows NOTHING` is trustworthy. Listed in the NOTES tooling section.
+
+`tools/probe-canopy.mjs` gained four assertions covering the above, because the
+claims are now prose in a service doc comment and NOTES 43 is explicit that prose
+is not a check. If `SUN`, the deck rect or the clear height moves, the probe fails
+rather than the documentation going stale.
+
+### NOTES entries
+
+68 (shadow reach vs direction), 69 (occlusion and its own bounce cancel; the free
+coefficient between two published fields is where the error lives), 70 (a region
+lit mainly by a constant is flat at every brightness — the complement of 63).
+
+NOTES 70 also records that the same diagnosis had been written in this system's
+own file for the soffit, 4.7 m above the surface with the identical problem, and
+neither system connected them. Fourth instance of a rule covering the case that
+produced it and not the next.
+
+### Coordination
+
+- **Terrain**: the premise is wrong and its albedo restraint was still correct.
+  Its detail is on a surface that is 89% sunlit, so the illumination term is not
+  the blocker there; the blocker is that the term is *uniform*. Column shadow
+  streaks are the one structure crossing that region and they already render.
+- **Lighting**: do **not** raise `environmentIntensity` for this. At 5.05:1 it is
+  already the dominant term and raising a constant produces exactly the flat and
+  milky outcome. If anything is worth doing it is giving the ambient spatial
+  variation, and `canopy.underDeck.ambientScale` is one input to that.
+- Nothing was asked of anyone and no sibling file was touched.
+
+### State
+
+No GPU work, no build, no capture, no browser. Port 5153 had no listener before
+and after. Canopy files typecheck clean; `Game.ts`, `BuildingSystem` and
+`VegetationSystem` had sibling errors during the round. `probe-canopy` passes in
+full, 10146 triangles, 6.88 MB of texture, unchanged — the field is a function,
+not geometry, so the cost delta is zero.
+
+### Correction: the elevation was stale, and every conclusion survived
+
+`site.SUN.elevation` held 11 degrees while `LightingSystem` shipped 6.2 from a
+private `SUN_ELEVATION_DEG`. Nothing in `src` imported the shared field, so the
+renderer never disagreed with it and only CPU probes were exposed. Terrain found
+it; `site.ts` has since been reconciled to 6.2 by its owner. **Not fixed here, on
+instruction — Lighting owns the sun.** All figures above have been recomputed.
+
+What changed: reach 24.3 -> **43.5 m**, displacement 22.1/9.5 -> **39.9 m X,
+17.3 m Z**, shadow landing x 33.3..46.5 instead of 15.5..28.7. The deck misses
+the forecourt by considerably more than first reported. Direct term 0.840 ->
+**0.475**, so ambient:direct goes from 2.86:1 to **5.05:1** and the
+ambient-dominance argument in NOTES 70 strengthens rather than weakens.
+
+What did **not** change: deck coverage of the forecourt is still 0.00%, column
+coverage still **10.97%**, and `ambientScale` is unchanged at 0.883/0.915/0.942
+because it depends only on geometry. `probe-canopy` passes in full.
+
+The invariance was checked rather than assumed, since identical output from
+changed input is exactly what a cached value looks like. An elevation sweep gives
+10.97% at 3, 4, 6.2 and 11 degrees, then 22.75% at 20 and 42.03% at 35. The
+columns span the full clear height and a ray needs 4.76/tan(el) to climb to the
+soffit — 43.8 m at 6.2 degrees against a maximum in-region distance of about
+20 m — so below roughly 14 degrees the shadow test is purely two-dimensional and
+cannot depend on elevation. Above that the deck itself starts landing on the
+forecourt: at 20 degrees it contributes 16.41% where it had contributed nothing.
+
+So **the column streaks are not longer or differently placed within the
+forecourt**, only outside it, and Terrain's position that they are the region's
+only large-scale structure is unaffected.
+
+`probe-shadowsource` now resolves the elevation from `LightingSystem`'s shipped
+constant, prints which source it used, and refuses to run if that disagrees with
+`site.SUN` by more than 0.05 degrees — because a constant no shipping code reads
+can only ever be validated by a tool. The guard ships a `--selftest` with the
+historical 11-versus-6.2 case as a positive control, since a guard sitting on a
+reconciled pair has never been seen to fire. It also takes `--elevation=` for
+what-if sweeps, which is how the invariance band above was established.
+
+Still stale and not mine to edit: NOTES case 63 carries the 11-degree reach and
+the claim that the entire forecourt is in shadow, and the one-line doc comment
+directly above `SUN` in `site.ts` still reads "~11 degrees elevation" immediately
+above the corrected 6.2 value.

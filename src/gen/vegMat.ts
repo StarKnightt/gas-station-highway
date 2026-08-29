@@ -180,6 +180,102 @@ export interface MatSheetOptions extends MatFieldOptions {
   radius: number;
   /** Grid pitch, metres. */
   pitch?: number;
+  /**
+   * Half-extents of the lattice, metres. Defaults to a square of `radius`.
+   *
+   * Present so the sheet can be built over a shape that is not a disc without a
+   * lattice of the bounding square's area: a 190 m road corridor inside a
+   * square lattice is 97% wasted cells, and the waste is paid in cover-field
+   * evaluations, which are the expensive part.
+   */
+  extent?: { halfX: number; halfZ: number };
+  /**
+   * Region weight, 0..1, replacing the disc and its edge fade.
+   *
+   * A disc is the wrong shape for a road fringe. Real scrub is densest at the
+   * pavement edge and thins outward, and it follows the road for as far as the
+   * road goes — so the caller supplies the shape, and this builder keeps doing
+   * the one thing it is good at, which is a continuous shared-vertex sheet with
+   * a soft boundary. Returning 0 drops the cell before the cover field is
+   * sampled, so an expensive region is still cheaper than a big lattice.
+   */
+  region?: (x: number, z: number) => number;
+}
+
+export interface RoadFringeOptions {
+  /** Half-width of the pavement. The fringe starts at its edge. */
+  halfPaved: number;
+  /** How far along the road, either way from x = 0. */
+  reach: number;
+  /** Nominal width of the fringe outboard of the pavement, metres. */
+  out: number;
+  /** Centre and radius of the near sheet, so the fringe can hand over to it. */
+  handoverCentre: [number, number];
+  handoverRadius: number;
+}
+
+/**
+ * The road fringe region: densest at the pavement edge, thinning outward,
+ * following the road for as far as the road goes.
+ *
+ * Exported, and consumed by both the system and `tools/vegmat.mjs`, because a
+ * probe that carries its own copy of the shape it is measuring agrees with the
+ * source by construction. That has already cost this system two rounds — a
+ * debris probe re-implementing the gain expression it was checking, and a unit
+ * assertion deriving its expectation from the same variable as its measurement.
+ * One copy, two callers.
+ */
+export function makeRoadFringeRegion(o: RoadFringeOptions): (x: number, z: number) => number {
+  return (x: number, z: number): number => {
+    // Distance outboard of the pavement edge, either side.
+    const out = Math.abs(z) - o.halfPaved;
+    if (out < -0.4) return 0;
+    // The width wanders along the road. A band of constant width has two
+    // straight edges hundreds of metres long, which is the most self-drawing
+    // shape this project keeps having to remove.
+    const w = o.out * (1 + 0.34 * Math.sin(x * 0.041 + 1.3) + 0.19 * Math.sin(x * 0.113 - 0.7));
+    /*
+     * A ridge, not a decay from the edge.
+     *
+     * The first version fell monotonically from the pavement outward, and
+     * measured against the real soil it came out at 0.055 mean cover against the
+     * near field's 0.263 — five times thinner than the ground it is supposed to
+     * join. The cause is `disturbance`: the trafficked strip either side of the
+     * pavement is compacted, `traffic = (1 - dist)^1.5` is the strongest term in
+     * `suitability`, and a shape that concentrates cover exactly there is asking
+     * the soil field for growth in the one place the soil field correctly says
+     * there is none.
+     *
+     * Which is also what a real shoulder looks like: gravel and grit in the
+     * first metre or two where the wheels and the plough reach, then the
+     * drainage strip, which is the densest growth on a neglected rural highway
+     * because every rainfall drains off the crown of the road into it and
+     * nothing ever mows it. So the ridge peaks about a fifth of the way out and
+     * falls off either side.
+     *
+     * `gain` above 1 is deliberate and it is the runoff. `suitability` models
+     * traffic, moisture, relief and soil kind; it does not model a road
+     * concentrating its whole surface's rainfall into a two-metre strip, and
+     * without saying so here the fringe inherits a dryland density in the one
+     * place on the site that is reliably watered. The scrub scatter makes the
+     * identical claim for its discrete plants a few hundred lines away. Result
+     * is clamped to 1 by the caller, so this raises the thin parts and cannot
+     * produce a sealed carpet.
+     */
+    const rise = smoothstep(-0.4, w * 0.22, out);
+    const fall = 1 - smoothstep(w * 0.3, w, out);
+    const gain = 2.3;
+    const across = rise * fall * gain;
+    if (across <= 0) return 0;
+    // Hands over to the near sheet rather than double-layering. Two alpha
+    // sheets over one patch of ground sum to a darker, flatter tone than
+    // either, and the near sheet is the one already judged in pixels.
+    const [hx, hz] = o.handoverCentre;
+    const handover = smoothstep(o.handoverRadius - 20, o.handoverRadius + 6, Math.hypot(x - hx, z - hz));
+    // Faded over the last 40 m so the far end thins rather than ends.
+    const away = 1 - smoothstep(o.reach - 40, o.reach, Math.abs(x));
+    return across * handover * away;
+  };
 }
 
 export interface MatSheetResult {
@@ -212,8 +308,11 @@ export function buildMatSheet(opts: MatSheetOptions): MatSheetResult {
   const rng = seededRng((opts.seed ?? 8821) + 7);
   const [cx, cz] = opts.centre;
 
-  const half = Math.ceil(opts.radius / pitch);
-  const n = half * 2 + 1;
+  // Rectangular by default-of-one: a square lattice is the `extent`-less case.
+  const halfI = Math.ceil((opts.extent?.halfX ?? opts.radius) / pitch);
+  const halfJ = Math.ceil((opts.extent?.halfZ ?? opts.radius) / pitch);
+  const nx = halfI * 2 + 1;
+  const nz = halfJ * 2 + 1;
 
   // Perturbed boundary. A hard circular cull edge is visible as an arc of
   // vanishing detail whenever the camera can see across it; the radius is
@@ -239,27 +338,32 @@ export function buildMatSheet(opts: MatSheetOptions): MatSheetResult {
     cov: number;
     ok: boolean;
   }
-  const verts: V[] = new Array(n * n);
+  const verts: V[] = new Array(nx * nz);
   let coverSum = 0;
   let coverN = 0;
 
-  for (let j = 0; j < n; j++) {
-    for (let i = 0; i < n; i++) {
-      const gx = cx + (i - half) * pitch;
-      const gz = cz + (j - half) * pitch;
+  for (let j = 0; j < nz; j++) {
+    for (let i = 0; i < nx; i++) {
+      const gx = cx + (i - halfI) * pitch;
+      const gz = cz + (j - halfJ) * pitch;
       const jx = gx + (rng() - 0.5) * pitch * 0.8;
       const jz = gz + (rng() - 0.5) * pitch * 0.8;
       const dx = jx - cx;
       const dz = jz - cz;
-      const r = Math.hypot(dx, dz);
-      const rEdge = radiusAt(Math.atan2(dz, dx));
-      const edge = 1 - smoothstep(rEdge - 8, rEdge, r);
+      let edge: number;
+      if (opts.region) {
+        edge = opts.region(jx, jz);
+      } else {
+        const r = Math.hypot(dx, dz);
+        const rEdge = radiusAt(Math.atan2(dz, dx));
+        edge = 1 - smoothstep(rEdge - 8, rEdge, r);
+      }
       const cov = edge <= 0 ? 0 : clamp01(field.cover(jx, jz) * edge);
       if (edge > 0 && !opts.blocked(jx, jz)) {
         coverSum += cov;
         coverN++;
       }
-      verts[j * n + i] = { x: jx, z: jz, y: opts.ground(jx, jz), cov, ok: cov > 0.02 };
+      verts[j * nx + i] = { x: jx, z: jz, y: opts.ground(jx, jz), cov, ok: cov > 0.02 };
     }
   }
 
@@ -267,7 +371,7 @@ export function buildMatSheet(opts: MatSheetOptions): MatSheetResult {
   const nrm: number[] = [];
   const col: number[] = [];
   const idx: number[] = [];
-  const vmap = new Int32Array(n * n).fill(-1);
+  const vmap = new Int32Array(nx * nz).fill(-1);
 
   const emit = (k: number): number => {
     if (vmap[k] >= 0) return vmap[k];
@@ -359,12 +463,12 @@ export function buildMatSheet(opts: MatSheetOptions): MatSheetResult {
   };
 
   let kept = 0;
-  for (let j = 0; j < n - 1; j++) {
-    for (let i = 0; i < n - 1; i++) {
-      const a = j * n + i;
-      const b = j * n + i + 1;
-      const d = (j + 1) * n + i;
-      const e = (j + 1) * n + i + 1;
+  for (let j = 0; j < nz - 1; j++) {
+    for (let i = 0; i < nx - 1; i++) {
+      const a = j * nx + i;
+      const b = j * nx + i + 1;
+      const d = (j + 1) * nx + i;
+      const e = (j + 1) * nx + i + 1;
       cells++;
       // A cell survives if any corner has cover. Dropping only all-zero cells
       // keeps the fade-out continuous; dropping cells whose *mean* is low would

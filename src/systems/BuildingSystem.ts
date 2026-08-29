@@ -51,7 +51,22 @@ import { buildingHeroBottle } from "../gen/buildingHeroBottle";
 import { makeConcrete, makeMacroNoise } from "../gen/textures";
 import { makeRng, type Rng } from "../gen/noise";
 import { gridSurface } from "../gen/geo";
-import { BUILDING, groundHeight, padY } from "../site";
+import { groundHeight, padY } from "../site";
+import {
+  type Blocker,
+  buildingBlockers,
+  buildingFloorHeight,
+  buildingFootprint,
+  COOLER,
+  COUNTER,
+  GONDOLA_X,
+  GONDOLA_Z,
+  GRAB_BOTTLE,
+  HELD_BOTTLE,
+  IN,
+  ISLAND,
+  PLAN,
+} from "../gen/buildingLayout";
 
 const V2 = (x: number, y: number) => new THREE.Vector2(x, y);
 const V3 = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
@@ -77,95 +92,6 @@ interface AccumLookup {
   wind: THREE.Vector2;
 }
 
-const PLAN = {
-  x0: -9.1,
-  x1: 3.5,
-  z0: BUILDING.minZ, // 31.5 - the front elevation, facing the forecourt
-  z1: BUILDING.maxZ, // 40.0 - the back
-  wall: 0.2,
-
-  roofDeck: 3.6,
-  parapet: 4.35,
-  ceiling: 2.78,
-
-  /** Storefront glazing runs between the two CMU piers. */
-  sfX0: -8.3,
-  sfX1: 1.5,
-  sillTop: 0.2, // CMU curb under the glazing
-  kickTop: 0.5,
-  glassTop: 2.6,
-  headTop: 2.72,
-  fasciaTop: 3.45,
-
-  doorX0: -6.575,
-  doorX1: -5.425,
-  doorHeight: 2.13,
-  transomBottom: 2.24,
-
-  /** Centre of the storefront system within the wall thickness. */
-  sfZ: 0.1,
-
-  /** Height of the darker painted base band. */
-  baseCourse: 0.62,
-};
-
-const IN = {
-  x0: PLAN.x0 + PLAN.wall,
-  x1: PLAN.x1 - PLAN.wall,
-  z0: PLAN.z0 + PLAN.wall,
-  z1: PLAN.z1 - PLAN.wall,
-};
-
-/** Reach-in cooler along the back wall. */
-const COOLER = { x0: -8.5, x1: -1.5, depth: 1.16, height: 2.12, doors: 8, kick: 0.09 };
-
-/**
- * Where the handheld bottle sits before it is picked up. Fixed and published,
- * not rng-placed: Player is aiming a video at this object and this system needs
- * a shot pose on it, and two agents cannot both point at a random spot. Height
- * is above finished floor — cooler shelf 2 plus the 26 mm the stock stands off.
- */
-const GRAB_BOTTLE = { x: -6.6, z: 38.72, aboveFloor: 0.646 };
-
-/** Where `?bgheld=1` stands it for inspection: open floor, hand height. */
-const HELD_BOTTLE = { x: -4.2, z: 35.4, aboveFloor: 1.16 };
-
-/** Checkout counter, to the right as you come in. */
-const COUNTER = { x0: 0.5, x1: 3.15, z0: 34.55, z1: 35.45, height: 0.98 };
-
-/** Gondola spine positions. 2.35 m apart gives a real 1.19 m shopping aisle. */
-const GONDOLA_Z = [34.6, 36.95];
-/**
- * The runs stop 0.65 m short of where they used to at the west end, and the
- * reason is a route rather than a look.
- *
- * At `x0: -8.2` both runs left 0.70 m to the west wall. That is wider than a
- * 0.64 m body, so every reachability test passed it, and it is 30 mm of margin —
- * which is not a corridor, it is a scrape. Measured with a clearance-constrained
- * shortest path, the only interior route to the cooler threaded that gap and the
- * doorway corner at 13 mm, and the walked controller stuck at the jamb rather
- * than follow it. The shop was passable and not crossable, and those are
- * different properties.
- *
- * `x0: -7.55` opens the west corridor to 1.35 m. It costs 0.65 m of the 7.2 m
- * run; the critic asked that the *density* of shelving read through the glass be
- * protected, not its length, and the stocking is unchanged.
- */
-const GONDOLA_X = { x0: -7.55, x1: -1.0, halfDepth: 0.6 };
-
-/**
- * The impulse island in front of the counter. One constant because the geometry
- * and the collision blocker were two hand-copied literals, and the first time
- * one of them moved the other would not have followed: the island is the single
- * obstruction that decided whether the store interior was walkable at all.
- *
- * It starts east of the gondola line so that x −1.0…0.15 is a clear 1.15 m
- * corridor from the door to the back of the store. Before that it began at
- * −0.4, which left only a route round its east end through 0.80 m and 0.82 m
- * gaps — 0.40 m of clearance against `PlayerSystem`'s 0.32 m body radius, so
- * both the cooler and the grab bottle were unreachable on foot.
- */
-const ISLAND = { x0: 0.15, x1: 1.95, cz: 33.1, halfDepth: 0.6, height: 1.05 };
 
 /**
  * Debug query parameters, for the forced-value diffs `NOTES.md` mandates
@@ -174,17 +100,18 @@ const ISLAND = { x0: 0.15, x1: 1.95, cz: 33.1, halfDepth: 0.6, height: 1.05 };
  * interior view was identified; `?bweather=8` drives the weathering shader to
  * an absurd value.
  */
+/**
+ * `location` is absent under Node, and a debug reader is not worth a hard
+ * dependency on a browser. Returning the fallback is right here — there is no
+ * query string to have set a flag in.
+ */
+const query = (): URLSearchParams =>
+  new URLSearchParams(typeof location === "undefined" ? "" : location.search);
+
 const dbg = (name: string, fallback = 0): number => {
-  const v = new URLSearchParams(location.search).get(name);
+  const v = query().get(name);
   return v === null ? fallback : Number(v);
 };
-
-interface Blocker {
-  minX: number;
-  maxX: number;
-  minZ: number;
-  maxZ: number;
-}
 
 interface MaterialKit {
   cmuExt: THREE.MeshStandardMaterial;
@@ -302,14 +229,38 @@ export class BuildingSystem implements GameSystem {
   private coolerDoors: THREE.Object3D[] = [];
   private grabbables: THREE.Object3D[] = [];
   private exteriorLight: THREE.Object3D | null = null;
-  private signCache = new Map<number, THREE.Material>();
   private vinylSheet!: VinylSheet;
   private plateSheet!: VinylSheet;
   private noticeSheet!: VinylSheet;
 
+  /**
+   * `ctx.quality.transmission`. Read once in `init` and baked into the two
+   * materials that use it, because the tier is decided before any system inits
+   * and never changes — so this costs one shader program per tier rather than
+   * multiplying variants, which is the whole point of the hook.
+   *
+   * Defaults true when the field is absent so the headless layout path and any
+   * older caller cannot silently drop the high-tier appearance.
+   */
+  private transmissionAllowed = true;
+
   init(ctx: SystemContext): void {
     const { scene, game } = ctx;
-    const q = new URLSearchParams(location.search);
+    /**
+     * `?bgtrans=0` forces the low-tier branch **without** changing the tier.
+     *
+     * `?tier=low` moves shadow map size, world capture and the detail patches at
+     * the same time, so a program-count drop under it cannot be attributed to
+     * this hook. The instruction was to prove `renderer.info.programs.length`
+     * falls rather than that the flag parsed, and a whole-tier measurement
+     * cannot do that for one flag. This is the isolated arm.
+     */
+    this.transmissionAllowed = (ctx.quality?.transmission ?? true) && dbg("bgtrans", 1) > 0;
+    if (typeof document === "undefined") {
+      this.initLayoutOnly(game);
+      return;
+    }
+    const q = query();
     /** ?bweather=8 drives the weathering to an absurd value for a pixel diff. */
     const weather = q.has("bweather") ? Number(q.get("bweather")) : 1;
     /** ?bcourse=6 paints the masonry joints red for a forced-value diff. */
@@ -371,6 +322,20 @@ export class BuildingSystem implements GameSystem {
 
     if (q.has("bopen")) entryDoor.rotation.y = entryDoor.userData.openAngle;
 
+    /**
+     * `?bcoolopen=2` swings cooler leaf 2 to its open angle, which is the state
+     * the grab interaction is always seen in and the state no capture had ever
+     * been taken in. Leaf 2 because that is the one a walked player opens.
+     */
+    if (q.has("bcoolopen")) {
+      const i = Number(q.get("bcoolopen"));
+      const leaf = this.coolerDoors[i];
+      if (!leaf) {
+        throw new Error(`BuildingSystem: ?bcoolopen=${i} but there are ${this.coolerDoors.length} leaves`);
+      }
+      leaf.rotation.y = leaf.userData.openAngle;
+    }
+
     scene.add(this.group);
 
     // Own camera presets. `core/shots.ts` and `tools/shoot.mjs` belong to other
@@ -394,19 +359,49 @@ export class BuildingSystem implements GameSystem {
    * around the building, so water drains away from the door on every
    * elevation instead of into it.
    */
+  /** Delegated: the plan is owned by `gen/buildingLayout`, which needs no DOM. */
   private finishedFloorLevel(): number {
-    let high = -Infinity;
-    for (let i = 0; i <= 40; i++) {
-      const t = i / 40;
-      high = Math.max(
-        high,
-        padY(PLAN.x0 + (PLAN.x1 - PLAN.x0) * t, PLAN.z0),
-        padY(PLAN.x0 + (PLAN.x1 - PLAN.x0) * t, PLAN.z1),
-        padY(PLAN.x0, PLAN.z0 + (PLAN.z1 - PLAN.z0) * t),
-        padY(PLAN.x1, PLAN.z0 + (PLAN.z1 - PLAN.z0) * t)
-      );
-    }
-    return high + 0.14;
+    return buildingFloorHeight();
+  }
+
+  /**
+   * Under Node there is no canvas, so this system cannot build itself — every
+   * texture it owns is rasterised at init, and `document.createElement` is not
+   * shimmable the way `location` is. That killed every CPU-side harness that
+   * constructed a `Game`, and at least one worked around it by substituting an
+   * **empty blocker list**, which does not fail loudly: it quietly plants
+   * through the shelving and over-populates the room.
+   *
+   * So publish the part that needs no rasteriser. The plan is pure arithmetic
+   * (`gen/buildingLayout`), and blockers, footprint, bounds, collision and floor
+   * height are all derived from it. Those are what siblings consume.
+   *
+   * Deliberately *not* published: the door and light lists, the grabbables, the
+   * interior material set. Each of those would have to be an empty array here,
+   * and an empty array is the shape of the bug this exists to remove — a
+   * consumer cannot tell "no cooler doors in this build" from "no cooler doors
+   * because there is no canvas". Anything asking for them should fail on
+   * `require`, loudly, in the tool that had no business needing them.
+   *
+   * `building.headless` is published so a tool can assert which path it got
+   * rather than infer it from what is missing.
+   */
+  private initLayoutOnly(game: SystemContext["game"]): void {
+    const F = buildingFloorHeight();
+    this.floorY = F;
+    this.blockers.push(...buildingBlockers());
+    game.provide("building.headless", true);
+    game.provide("building.bounds", new THREE.Box3(V3(PLAN.x0, F - 0.5, PLAN.z0), V3(PLAN.x1, F + PLAN.parapet + 0.06, PLAN.z1)));
+    game.provide("building.footprint", buildingFootprint(F));
+    game.provide("building.blockers", this.blockers);
+    game.provide("building.collide", this.collide);
+    game.provide("building.floorHeight", (x: number, z: number) =>
+      x > IN.x0 && x < IN.x1 && z > PLAN.z0 && z < IN.z1 ? F : groundHeight(x, z)
+    );
+    console.warn(
+      `BuildingSystem: no document, so layout only - ${this.blockers.length} blockers, ` +
+        `footprint and floor height are real; geometry, materials and interactables are absent.`
+    );
   }
 
   /**
@@ -673,7 +668,28 @@ export class BuildingSystem implements GameSystem {
     });
 
     /* --- metals --- */
-    const alu = surfaced(aluMaps, { metalness: 0.82, roughness: 0.44, normalScale: V2(0.3, 0.3), envMapIntensity: 1.1 });
+    /**
+     * `envMapIntensity: 1.0`, down from 1.1, and the reason is a clipped pixel
+     * rather than a taste call.
+     *
+     * Every fully-clipped pixel in the two door-approach stills is on this
+     * material — the storefront mullion at `_t95-door.png` x 1491–1505 and the
+     * door push bar at x 1481–1599 — 521 px and 197 px at exactly
+     * (255,255,255), neutral, in a surround already at 253. `alu` was also the
+     * only material in this system authored above 1.0, which is a surface
+     * reflecting 110% of the environment in front of it.
+     *
+     * That number was written while `envMapIntensity` was inert (NOTES case 26),
+     * so it is a compensation from the window when nothing read it, and it has
+     * been live since world capture was promoted. This is the third instance of
+     * that pattern in this file.
+     *
+     * CPU-verified only: the pixels are measured, the attribution to *this*
+     * constant is not, because separating it from the reflected radiance needs
+     * an A/B render and the GPU is the user's. It is landed anyway because 1.0
+     * is the physical value and 1.1 was never a considered one.
+     */
+    const alu = surfaced(aluMaps, { metalness: 0.82, roughness: 0.44, normalScale: V2(0.3, 0.3), envMapIntensity: 1.0 });
     const galv = surfaced(galvMaps, { metalness: 0.7, roughness: 0.58, normalScale: V2(0.4, 0.4), envMapIntensity: 1.0 });
     const steel = surfaced(steelMaps, { metalness: 0.6, roughness: 0.7, normalScale: V2(0.55, 0.55), envMapIntensity: 0.85 });
     applyBuildingWeather(steel, {
@@ -1105,13 +1121,54 @@ export class BuildingSystem implements GameSystem {
       map: trofferLensTex,
       roughness: 0.42,
     });
-    // TODO(System 4 - lighting): the emissive here is a stand-in for the tube
-    // lights in the mullions. Kept low so the liner does not blow out to paper
-    // white and swallow the silhouettes of the bottles standing against it.
+    /**
+     * The lit white liner at the back of the cooler.
+     *
+     * The emissive was written as a stand-in for the tube lights in the
+     * mullions, with a note that it was "kept low so the liner does not blow out
+     * to paper white and swallow the silhouettes of the bottles standing against
+     * it". It is now measurably doing exactly that — 5750 px at exactly
+     * (255,255,255) in the grab still, 3158 of them in one cluster on this
+     * surface — and the stated reason for the value is the defect.
+     *
+     * Retired at 0, and **not for the reason I expected**. The hypothesis was a
+     * double count: `lightInterior.ts` now places three `RectAreaLight`s at
+     * intensity 7.0 in the cooler slots this system publishes, aimed *back into
+     * the cabinet*, with the comment "the light the customer sees is bounce off
+     * the liner, not the lamp" — so the thing this term stood in for exists, and
+     * a stand-in that outlives its subject is a second copy of it.
+     *
+     * The A/B says otherwise. On the `grab` pose, one build, one browser
+     * (`2026-08-29T060748Z-DP_qPeDs`), measured as pixels over luma 235:
+     *
+     *   this term at 0.22 …… +117 px of 170,315   (0.07%)
+     *   `?ibounce=0.35` …… 1,341 px               (0.8%)
+     *   `?lamp=0.5` ………… −53,064 px              (31%)
+     *   `?lamp=0.25` ……… −155,821 px             (91%)
+     *
+     * So it is not a double count worth 22%; it is **inert**, and inert for a
+     * reason worth keeping in mind before authoring anything else onto this
+     * surface: the liner sits on the flat top of the tone curve, where a small
+     * additive term has nowhere to go (NOTES case 42). Removed because a term
+     * that models nothing and measures nothing is a value somebody will later
+     * tune in good faith, not because it was costing radiance.
+     *
+     * The blowout is the lamps, and those are Lighting's. Do not compensate for
+     * them here — dropping this albedo would be exactly the kind of local
+     * correction this file spent last night retiring.
+     *
+     * `?bliner=1` restores 0.22. Scaling an existing uniform, deliberately: a
+     * second material variant would cost a shader program, and program count is
+     * now a first-load cost the user feels directly.
+     */
+    const linerEmissive = dbg("bliner", 0);
+    if (!Number.isFinite(linerEmissive)) {
+      throw new Error(`BuildingSystem: ?bliner is not a number`);
+    }
     const coolerLiner = std({
       color: 0xbfc7cc,
       emissive: new THREE.Color(0xcfe0ea),
-      emissiveIntensity: 0.22,
+      emissiveIntensity: 0.22 * linerEmissive,
       roughness: 0.62,
     });
 
@@ -1157,9 +1214,35 @@ export class BuildingSystem implements GameSystem {
      * length through it, which is the whole difference between a bottle and a
      * cylinder painted bottle-coloured.
      */
+    /**
+     * ### The tier hook
+     *
+     * Transmission is a large shader *and* an extra full-scene render pass, so
+     * it is one of the better single flags available for a weak host — shader
+     * compilation is 92% of the cold load (215,956 ms cold against 2,003 ms
+     * warm), and that cost lands before the user sees anything.
+     *
+     * **These two leaves are the only transmissive materials this system owns.**
+     * The storefront glazing, the inner leaf and the cooler doors are all
+     * already `transmission: 0` and have been since the black-rectangle fix:
+     * they carry transmittance through *alpha* with a black diffuse, and
+     * reflection through a separate additive leaf. So the risk of a low tier
+     * turning the shopfront opaque or black **does not exist here**, and that is
+     * a consequence of the earlier compositing separation rather than luck. The
+     * windows are byte-identical at every tier.
+     *
+     * What changes at `low` is the handheld bottle, and it changes to something
+     * deliberate rather than to zero: an opaque shell would be a white plastic
+     * bottle, so instead the shell keeps `transparent: true` and drops to
+     * `opacity: 0.62`, which reads as frosted PET with the label and the fill
+     * showing faintly through. Plainer, not broken. `opacity` is a uniform, so
+     * this buys the program without adding one.
+     */
+    const trans = this.transmissionAllowed;
     const heroShell = new THREE.MeshPhysicalMaterial({
       color: 0xffffff,
-      transmission: 1.0,
+      transmission: trans ? 1.0 : 0,
+      opacity: trans ? 1 : 0.62,
       ior: 1.5,
       thickness: 0.0045,
       roughness: 0.055,
@@ -1187,7 +1270,8 @@ export class BuildingSystem implements GameSystem {
      */
     const heroLiquid = new THREE.MeshPhysicalMaterial({
       color: 0xffffff,
-      transmission: 0.94,
+      transmission: trans ? 0.94 : 0,
+      opacity: trans ? 1 : 0.5,
       ior: 1.333,
       thickness: 0.06,
       roughness: 0.02,
@@ -1409,17 +1493,6 @@ export class BuildingSystem implements GameSystem {
   ): THREE.Mesh {
     const m = this.addMesh(geometry, material, name, renderOrder);
     if (refl) this.addMesh(geometry, refl, `${name}-refl`, renderOrder + 1);
-    return m;
-  }
-
-  /** Blank taped-up notice. Paper, not plastic: matt and slightly warm. */
-  private signMaterial(color: number): THREE.Material {
-    let m = this.signCache.get(color);
-    if (!m) {
-      m = new THREE.MeshStandardMaterial({ color, roughness: 0.94, metalness: 0, side: THREE.DoubleSide });
-      this.materials.push(m);
-      this.signCache.set(color, m);
-    }
     return m;
   }
 
@@ -1713,14 +1786,45 @@ export class BuildingSystem implements GameSystem {
       brk.translate(leafW - 0.12, py, -0.032);
       door.add(new THREE.Mesh(brk, this.mat.alu));
     }
+    /**
+     * The two flyers taped to the door, from the same stack as the ones on the
+     * storefront glass.
+     *
+     * **On the inside surface, printed side facing out.** The offset is `+0.009`
+     * — interior of the leaf, the far side of the pane from the forecourt —
+     * while the facing stays `-z` so the print reads from outside through the
+     * glass. That is where shop notices actually go, and it is the same
+     * convention as the storefront set at `sfZ + 0.012`. They were previously at
+     * `-0.009`, taped to the *outside* of the door: sky-lit paper, which is why
+     * every interior and environment lighting lever measured nothing on them.
+     *
+     * Both quads sit entirely within the glazed opening — x 0.055..0.975, y
+     * 0.26..2.02 for a leaf 1.030 by 2.11 — so moving them behind the pane
+     * keeps them visible rather than hiding them behind a rail.
+     *
+     * **The cells are the two whose storefront twins are furthest from the
+     * door**: `tabs` sits at x −7.4, off the sightline from the forecourt, and
+     * `community` at +0.9, six metres the other way. The same flyer on the door
+     * and again on the glass down the elevation is what a real station looks
+     * like — the person with the tape had a stack of them. The same flyer twice
+     * within a metre is a repeated texture, which is the only version worth
+     * avoiding, and choosing the far pair costs two words.
+     *
+     * Heights come from each cell's own aspect so nothing is stretched. They
+     * land within 8 mm of the sizes these quads were authored at, so the
+     * silhouette on the elevation is unchanged.
+     */
     for (const s of [
-      { x: 0.3, y: 1.55, w: 0.21, h: 0.29, r: 0.04, c: 0xd9d4c4 },
-      { x: 0.63, y: 1.36, w: 0.15, h: 0.2, r: -0.07, c: 0xcac2ae },
+      { cell: "tabs", x: 0.3, y: 1.55, w: 0.21, r: 0.04 },
+      { cell: "community", x: 0.63, y: 1.36, w: 0.15, r: -0.07 },
     ]) {
-      const p = buildingQuad(s.w, s.h, "-z");
+      const p = buildingQuad(s.w, s.w / this.noticeSheet.aspect[s.cell], "-z");
+      applySheetCell(p, this.noticeSheet.cells[s.cell]);
       p.rotateZ(s.r);
-      p.translate(s.x, s.y, -0.009);
-      door.add(new THREE.Mesh(p, this.signMaterial(s.c)));
+      p.translate(s.x, s.y, 0.009);
+      const m = new THREE.Mesh(p, this.mat.notice);
+      m.name = "entry-door-notice";
+      door.add(m);
     }
 
     door.userData = {
@@ -2571,7 +2675,23 @@ export class BuildingSystem implements GameSystem {
         kind: "hinge",
         axis: "y",
         closedAngle: 0,
-        openAngle: 1.5,
+        /*
+         * 1.1 rad (63°), not 1.5 (86°), and the reason is that the user has to be
+         * able to close it on camera.
+         *
+         * A leaf at 86° stands very nearly parallel to the aisle, so to anyone
+         * standing in that aisle it presents its *edge* — a few centimetres of
+         * cross-section on a 668 mm door. Measured: from the grab stance, a ray
+         * aimed at the open leaf's own centre reached the neighbouring closed pane
+         * first, so the click closed door 1 while door 2 was the open one. That is
+         * not a harness quirk; a player aiming at a door they can barely see will
+         * miss it the same way, and this is the beat the brief asks for.
+         *
+         * At 63° the leaf presents a real face to the aisle, and a reach-in door
+         * resting part-open is the ordinary case rather than a compromise. It also
+         * sweeps 595 mm instead of 667 mm.
+         */
+        openAngle: 1.1,
         swing: "outward",
         index: i,
         width: w,
@@ -2836,44 +2956,13 @@ export class BuildingSystem implements GameSystem {
   }
 
   private buildBlockers(): void {
-    const w = PLAN.wall;
-    this.blockers.push(
-      { minX: PLAN.x0, maxX: PLAN.x0 + w, minZ: PLAN.z0, maxZ: PLAN.z1 },
-      { minX: PLAN.x1 - w, maxX: PLAN.x1, minZ: PLAN.z0, maxZ: PLAN.z1 },
-      { minX: PLAN.x0, maxX: PLAN.x1, minZ: PLAN.z1 - w, maxZ: PLAN.z1 },
-      // Front wall, broken by the door opening.
-      { minX: PLAN.x0, maxX: PLAN.doorX0, minZ: PLAN.z0, maxZ: PLAN.z0 + w },
-      { minX: PLAN.doorX1, maxX: PLAN.x1, minZ: PLAN.z0, maxZ: PLAN.z0 + w },
-      { minX: COOLER.x0, maxX: COOLER.x1, minZ: IN.z1 - COOLER.depth, maxZ: IN.z1 },
-      { minX: COUNTER.x0 - 0.03, maxX: COUNTER.x1 + 0.03, minZ: COUNTER.z0 - 0.03, maxZ: COUNTER.z1 + 0.7 },
-      { minX: ISLAND.x0, maxX: ISLAND.x1, minZ: ISLAND.cz - ISLAND.halfDepth, maxZ: ISLAND.cz + ISLAND.halfDepth },
-      // Ice machine and propane cage, outside the front wall.
-      { minX: 1.75, maxX: 2.95, minZ: PLAN.z0 - 0.86, maxZ: PLAN.z0 },
-      { minX: -9.78, maxX: -8.62, minZ: PLAN.z0 - 0.94, maxZ: PLAN.z0 + 0.02 }
-    );
-    for (const cz of GONDOLA_Z) {
-      this.blockers.push({
-        minX: GONDOLA_X.x0,
-        maxX: GONDOLA_X.x1,
-        minZ: cz - GONDOLA_X.halfDepth,
-        maxZ: cz + GONDOLA_X.halfDepth,
-      });
-    }
+    this.blockers.push(...buildingBlockers());
   }
 
   private publish(game: SystemContext["game"], F: number, entryDoor: THREE.Group): void {
     game.provide("building.root", this.group);
     game.provide("building.bounds", new THREE.Box3(V3(PLAN.x0, F - 0.5, PLAN.z0), V3(PLAN.x1, F + PLAN.parapet + 0.06, PLAN.z1)));
-    game.provide("building.footprint", {
-      minX: PLAN.x0,
-      maxX: PLAN.x1,
-      minZ: PLAN.z0,
-      maxZ: PLAN.z1,
-      floorY: F,
-      roofY: F + PLAN.roofDeck,
-      parapetY: F + PLAN.parapet + 0.052,
-      wallThickness: PLAN.wall,
-    });
+    game.provide("building.footprint", buildingFootprint(F));
     /**
      * Every material drawn only inside the sealed room, for the lighting
      * system's interior IBL pass.

@@ -1,4 +1,5 @@
 import { Game } from "./core/Game";
+import { installLoadingScreen, reportBootFailure } from "./core/loadingScreen";
 import { LightingSystem } from "./systems/LightingSystem";
 import { TerrainSystem } from "./systems/TerrainSystem";
 import { PlayerSystem } from "./systems/PlayerSystem";
@@ -16,6 +17,10 @@ import { CanopySystem } from "./systems/CanopySystem";
  * appended here and pull whatever they need out of the service registry
  * (`groundHeight`, `sunDirection`, `sunLight`, ...).
  */
+// Before the Game, so the overlay is already listening when `start()` announces
+// its system list. It only adopts the markup index.html already painted.
+installLoadingScreen();
+
 const game = new Game();
 
 game.register(new LightingSystem(), new TerrainSystem(), new PumpSystem(), new CarSystem(), new PlayerSystem(), new BuildingSystem());
@@ -37,6 +42,5 @@ game.register(new InteractionSystem());
 
 game.start().catch((err) => {
   console.error(err);
-  const el = document.getElementById("loading");
-  if (el) el.textContent = String(err);
+  reportBootFailure(err);
 });

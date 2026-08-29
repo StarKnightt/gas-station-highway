@@ -634,12 +634,73 @@ export class LightingSystem implements GameSystem {
       return;
     }
 
-    // `nofluoro` and `fluoro6` still move both, so every existing ablation and
-    // every sibling's saved comparison keeps its old meaning. `?lamp=` is the
-    // new lever and it moves the lamps alone.
+    // `nofluoro` still zeroes everything interior, unchanged. But note what that
+    // flag actually spans, because its name cost me two wrong attributions in one
+    // hour: it multiplies the lamps, the storefront daylight rect *and* both door
+    // bounce lights. It bounds the interior's total contribution and attributes
+    // none of it. `?lamp=`, `?dbounce=` and `?drect=` are the levers that
+    // attribute, and they exist because that flag does not (NOTES.md case 65).
     const gain = this.force.nofluoro ? 0 : this.force.fluoro6 ? 6 : 1;
-    const lampGain = this.force.nofluoro ? 0 : this.force.fluoro6 ? 6 : num("lamp", 1);
+    const lampQ = new URLSearchParams(location.search).get("lamp");
+    // 0.3 is part of the landed grade documented at the `buildInteriorLighting`
+    // call below. `?lamp=1` restores the value that shipped before it.
+    let lampGain = 0.3;
+    if (this.force.nofluoro) lampGain = 0;
+    // Still "six times the lamps as shipped", i.e. relative to the current
+    // default rather than to the authored constant, so the flag's name keeps
+    // meaning what it says after the grade moved under it.
+    else if (this.force.fluoro6) lampGain = 1.8;
+    else if (lampQ !== null) {
+      // Throw rather than let `Number("0.3 ")`-style junk become NaN. A NaN
+      // light intensity does not error in three; it silently contributes
+      // nothing, so a mistyped sweep value would read as "the lamps do not
+      // matter" — which is precisely the wrong conclusion, and precisely the
+      // conclusion this sweep exists to test.
+      lampGain = Number(lampQ);
+      if (!Number.isFinite(lampGain) || lampGain < 0) {
+        throw new Error(`[lighting] ?lamp=${lampQ} is not a finite non-negative number.`);
+      }
+    }
+    // Defaults leave the shipped path bit-identical: all the transmitted
+    // daylight still goes through the unshadowed rect until the spot has been
+    // calibrated to the same frame mean and shown to beat it on structure.
+    // Promoting an unmeasured change is how the disc survived a day.
+    const qnum = (key: string, dflt: number): number => {
+      const raw = new URLSearchParams(location.search).get(key);
+      if (raw === null) return dflt;
+      const v = Number(raw);
+      if (!Number.isFinite(v) || v < 0) {
+        throw new Error(`[lighting] ?${key}=${raw} is not a finite non-negative number.`);
+      }
+      return v;
+    };
     const build = buildInteriorLighting({
+      // The landed interior grade. Each of these three multiplies an authored
+      // constant in `lightInterior.ts`, and each is here rather than folded into
+      // that constant so the size of the correction stays legible: `?dbounce=1`
+      // restores exactly what shipped before, which is what an ablation against
+      // this decision needs.
+      //
+      // What is derived, and what is not. The *direction* is derived and the old
+      // values are ruled out: `doorBounce` plus `doorGlow` were 44.8 of the 92.0
+      // luma of interior lighting on `interior_cold`, the largest term in the
+      // room, while standing in for sun bouncing off a floor patch that receives
+      // sin(6.2 deg) = 10.8% of the beam and returns about 2% of it at a floor
+      // albedo near 0.2. A 2% mechanism cannot be a 49% term. The shipped result
+      // was an interior p50 of 181 against an exterior 82 - the room brighter
+      // than the dawn it opens onto, which inverts the brief's central contrast.
+      //
+      // The *exact* landing point is a grade, not a derivation. These three land
+      // `interior_cold` at p50 76.9 against 91.6 outdoors in the same round, with
+      // 12.67% of the frame below luma 32 where the old values gave 1.60%, so the
+      // room is now the darker side of the doorway and has a black point.
+      rectShare: qnum("drect", 0.2),
+      spotShare: qnum("dspot", 0),
+      spotWatts: qnum("dwatts", 40),
+      bounceGain: qnum("dbounce", 0.1),
+      troffCast: qnum("tcast", 0),
+      troffCastMax: qnum("tcastn", 1),
+      spotCasts: new URLSearchParams(location.search).get("dnoshadow") !== "1",
       buildingRoot: root,
       glazingShadow: !this.force.clearglass,
       fluorescents,

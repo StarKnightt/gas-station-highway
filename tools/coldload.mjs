@@ -1,209 +1,440 @@
 #!/usr/bin/env node
 /**
- * `node tools/coldload.mjs [--n=5] [--no-build] [--rehearsal]`
+ * How long does it take to be able to walk around, and why is the first time
+ * so much worse than every time after it?
  *
- * Loads the scene from cold, N times, and reports whether every load reached
- * `__SCENE_READY` and how far apart the ready times were.
+ *   node tools/coldload.mjs              # build, then cold / warm / cold again
+ *   node tools/coldload.mjs --no-build   # reuse the last build
+ *   node tools/coldload.mjs --runs 3     # extra cold profiles, for variance
  *
- * ## Why this is a separate harness
+ * ## The question
  *
- * `stress.mjs` loads the scene exactly **once**, so it says nothing about
- * whether a load *reliably* succeeds. The deliverable is a single continuous
- * take that must survive init on the user's machine, once, with no second
- * attempt — and **a stutter can be re-shot while a failed init cannot be shot at
- * all**, which makes this the higher-priority reliability question of the two.
+ * Perf measured 218.7 s, 171.9 s and one hard tab crash on *first* loads,
+ * against a steady 20.8-21.9 s on repeats, across three independent sequences.
+ * That is a 3-10x gap, and the number the user will actually experience is the
+ * slow one, because their first load of this scene is a first load. Confirming
+ * the gap is worth little on its own; what changes the advice is *what makes a
+ * load cold*, and there are several candidates that a single stopwatch cannot
+ * tell apart:
  *
- * It is not hypothetical. Under contention, four cold loads of the same bundle
- * minutes apart gave one hard `Page crashed` on `page.goto` and one timeout at
- * 171.9 s against 21.9 s and 30.9 s for the two that succeeded. Two sibling
- * agents independently reported the same two faults.
+ * - **The GPU program cache.** Chrome compiles GLSL to a driver binary and
+ *   caches it on disk, keyed to the browser profile and the driver version. If
+ *   this is the cause, the penalty is paid roughly once per machine and the
+ *   right advice is "load it once before you record".
+ * - **The HTTP cache.** Only ~2 requests and a few MB of bundle, so this should
+ *   be small, but it is free to rule out.
+ * - **Neither.** If a fresh profile is fast and the very first run of the
+ *   session is slow regardless, it is the driver or the OS, and the advice is
+ *   different again.
  *
- * Pass criteria are `QUIET-HOST-PROTOCOL.md` §2.1, evaluated by
- * `voidcheck.mjs#evaluateColdLoads` rather than by eye.
+ * So this does not time "the app". It runs the same page under three conditions
+ * that differ in exactly one thing each, and reports where the time goes inside
+ * each load rather than only the total.
  *
- * Also records every non-2xx response, which covers the icon 404 that
- * `PERF.md` §13.7 removed — free to keep, and it is a regression test now.
+ * ## Why a persistent profile rather than the usual launch
+ *
+ * Every other harness here uses `browser.newContext()`, which is deliberately
+ * incognito — a fresh cache and a fresh GPU program cache every single time. In
+ * other words **every measurement this project has ever taken of load time was
+ * a cold one, and none of them could have observed the warm case at all.** A
+ * cold-versus-warm question cannot be asked without a profile on disk that
+ * survives between loads, which is what `launchPersistentContext` gives.
  */
-
-import path from "node:path";
-import net from "node:net";
-import { execFile } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import fs from "node:fs/promises";
-import { launchOptions, assertHardwareGpu, isSoftwareRenderer } from "./gpu.mjs";
-import { assertPrivateBuildDir, assertBuildIntact } from "./scratch.mjs";
-import { evaluateColdLoads } from "./voidcheck.mjs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { launchOptions, assertSceneGpu, readGpuInfo } from "./gpu.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PORT = 5152;
-const BUILD_DIR = ".shot-build/coldload";
+const BUILD_DIR = path.join("shots", "coldload", ".build");
+const OUT_DIR = path.join(ROOT, "shots", "coldload");
+
 const argv = process.argv.slice(2);
-const arg = (n, d) => argv.find((a) => a.startsWith(`--${n}=`))?.slice(n.length + 3) ?? d;
-const N = Number(arg("n", "5"));
-const DO_BUILD = !argv.includes("--no-build");
-const REHEARSAL = argv.includes("--rehearsal");
-/** Generous: the point is to distinguish slow from never, not to enforce a budget. */
-const READY_TIMEOUT_MS = Number(arg("timeout", "150000"));
+const flag = (n) => argv.includes(`--${n}`);
+const opt = (n, d) => {
+  const i = argv.indexOf(`--${n}`);
+  return i >= 0 && argv[i + 1] ? Number(argv[i + 1]) : d;
+};
+/**
+ * Overridable, and deliberately outside the block every other harness draws
+ * from: this one may need to run alongside the quiet window rather than inside
+ * it, so whoever is scheduling should be able to move it without editing a file
+ * they do not own.
+ */
+const PORT = opt("port", 5171);
+const COLD_RUNS = opt("runs", 2);
+/**
+ * Generous, because the thing being measured is reported to take three minutes
+ * and to sometimes crash. A timeout shorter than the phenomenon turns "slow" into
+ * "failed" and loses the number.
+ */
+const LOAD_TIMEOUT_MS = opt("timeout", 420) * 1000;
 
-const resources = { server: null, browser: null };
-let down = false;
-async function shutdown(code, reason) {
-  if (down) return;
-  down = true;
-  if (reason) console.error(`\n[coldload] ${reason}`);
-  for (const [label, fn] of [
-    ["browser", async () => resources.browser && (await resources.browser.close())],
-    [
-      "preview server",
-      async () => {
-        const s = resources.server;
-        if (!s) return;
-        if (typeof s.close === "function") await s.close();
-        else if (s.httpServer) await new Promise((r) => s.httpServer.close(r));
-      },
-    ],
-  ]) {
-    try {
-      await fn();
-    } catch (err) {
-      console.error(`[coldload] failed to close ${label}: ${err?.message ?? err}`);
-    }
-  }
-  console.log((await portInUse(PORT)) ? `[coldload] !! port ${PORT} still held` : `[coldload] teardown: port ${PORT} free`);
-  process.exit(code);
-}
-process.on("SIGINT", () => void shutdown(130, "SIGINT"));
-process.on("SIGTERM", () => void shutdown(143, "SIGTERM"));
-process.on("uncaughtException", (e) => void shutdown(1, e?.stack ?? e));
-process.on("unhandledRejection", (e) => void shutdown(1, e?.stack ?? e));
-
-function portInUse(port) {
-  return new Promise((resolve) => {
-    const s = net.createConnection({ host: "127.0.0.1", port });
-    const done = (v) => {
-      s.destroy();
-      resolve(v);
-    };
-    s.on("connect", () => done(true));
-    s.on("error", () => done(false));
-    setTimeout(() => done(false), 700);
+/**
+ * Installed before any module runs, so the clock starts at navigation rather
+ * than at whenever the test got around to asking.
+ *
+ * `Game` already publishes the two milestones this needs — it removes the
+ * loading overlay on rendered frame 2 and sets `__SCENE_READY` on frame 6 — so
+ * this listens for those rather than polling for a guess at readiness. What it
+ * adds is the split *before* the first frame, which is where a procedural scene
+ * spends its time: module evaluation, then every system's `init()` generating
+ * geometry on the CPU, then the first frame, which is where the driver compiles
+ * every shader the scene uses.
+ */
+/**
+ * Injected **after the navigation commits**, not as an init script.
+ *
+ * ## Why, and how the first version failed
+ *
+ * The first version was an `addInitScript` that set up an object, added a
+ * `scene-ready` listener on `window`, attached a `MutationObserver`, and started
+ * a rAF loop. All eight loads came back with an empty frame array and no
+ * first-frame mark, while the scene demonstrably rendered 235 frames.
+ *
+ * `document.documentElement` **is null in an init script** — measured, not
+ * assumed: `readyState` is `"loading"` and `documentElement` reads `NULL`. So
+ * `observe(document.documentElement, ...)` throws
+ * `TypeError: parameter 1 is not of type 'Node'`, and **Playwright swallows
+ * exceptions thrown by init scripts** — nothing reaches `pageerror`, nothing is
+ * logged, the run continues. Every statement after the throw, including the rAF
+ * registration, simply never happened.
+ *
+ * What made it hard to see is that the survivors looked like a working probe.
+ * The object was readable and the `scene-ready` mark was correct, because both
+ * were established *before* the throwing line. So the probe reported an empty
+ * frames array whose `Math.max` is `-Infinity`, and an unset mark that a
+ * division turned into a confident `0.0 s`.
+ *
+ * **The boundary between what worked and what did not was exactly the line that
+ * threw**, which is what identified it. Ordering is diagnostic when a script
+ * dies halfway.
+ *
+ * Injecting after commit removes the whole class: the document exists, an
+ * exception surfaces as a rejected `evaluate`, and `performance.now()` still
+ * measures from this document's time origin so no precision is lost.
+ */
+const RECORDER = () => {
+  const L = { t0: performance.now(), marks: {}, frames: [], armed: true };
+  window.__LOAD = L;
+  window.addEventListener("scene-ready", () => {
+    L.marks.sceneReady = performance.now() - L.t0;
+    // Where readiness falls in the frame record, so the enormous single "frame"
+    // that is really the synchronous init block can be reported as what it is
+    // rather than contaminating the after-load frame statistics.
+    L.marks.readyAtFrame = L.frames.length;
   });
+
+  // Frame 2 is where Game removes the overlay. Absence is not removal — a naive
+  // "is it gone?" fires immediately on a document that has not parsed the node
+  // yet — so this waits until it has been seen present.
+  let seen = !!document.getElementById("loading");
+  new MutationObserver(() => {
+    if (document.getElementById("loading")) seen = true;
+    else if (seen && L.marks.firstFrames === undefined) {
+      L.marks.firstFrames = performance.now() - L.t0;
+    }
+  }).observe(document.documentElement, { childList: true, subtree: true });
+
+  // Per-frame times, so "interactive" can be defined as the scene actually
+  // holding a frame rate rather than as a milestone having fired. A scene that
+  // reaches frame 6 and then spends four seconds compiling a shader the moment
+  // you turn around is not interactive, and a milestone cannot tell you that.
+  let last = performance.now();
+  const tick = () => {
+    const now = performance.now();
+    L.frames.push(+(now - last).toFixed(2));
+    last = now;
+    if (L.frames.length < 900) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  return { armed: true, documentElement: document.documentElement?.tagName ?? null };
+};
+
+/** First moment the scene holds a frame budget for a sustained stretch. */
+function settled(frames, budgetMs = 25, need = 30) {
+  let run = 0;
+  let elapsed = 0;
+  for (let i = 0; i < frames.length; i++) {
+    elapsed += frames[i];
+    run = frames[i] <= budgetMs ? run + 1 : 0;
+    if (run >= need) return { atMs: elapsed, frame: i };
+  }
+  return null;
 }
 
-function card() {
-  return new Promise((r) =>
-    execFile("nvidia-smi", ["--query-gpu=memory.used,utilization.gpu", "--format=csv,noheader,nounits"], { timeout: 4000 }, (e, o) => {
-      if (e) return r(null);
-      const [used, util] = String(o).trim().split(/,\s*/).map(Number);
-      r({ used, util });
-    })
-  );
+async function measure(page, url) {
+  const started = Date.now();
+  let crashed = null;
+  page.on("crash", () => (crashed = "the tab crashed"));
+  try {
+    await page.goto(url, { waitUntil: "commit", timeout: 60_000 });
+    // After commit, so the document exists and a failure here is loud.
+    const armed = await page.evaluate(RECORDER);
+    if (!armed?.armed || !armed.documentElement) {
+      throw new Error(`the frame recorder did not arm (documentElement: ${armed?.documentElement})`);
+    }
+    await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 420_000, polling: 500 });
+  } catch (e) {
+    return { failed: crashed ?? e.message.split("\n")[0], wallMs: Date.now() - started };
+  }
+  // Let the frame recorder run on past readiness, because the interesting
+  // stalls are after it.
+  await page.waitForTimeout(6000);
+  const load = await page.evaluate(() => ({
+    marks: window.__LOAD.marks,
+    frames: window.__LOAD.frames,
+    programs: window.__GAME?.renderer?.info?.programs?.length ?? null,
+    errors: (window.__SYSTEM_ERRORS ?? []).map((e) => `${e.system}/${e.phase}: ${e.message}`),
+    contextLost: window.__CONTEXT_LOST ?? null,
+  }));
+  /**
+   * The liveness guard. An empty frames array is not a fast scene, it is an
+   * instrument that never ran, and the two are indistinguishable downstream:
+   * `Math.max()` of nothing is `-Infinity` and a null mark divided by 1000 prints
+   * as `0.0`. So the count is carried through and every derived figure is null
+   * unless the recorder actually produced samples.
+   */
+  const live = load.frames.length > 0;
+  /**
+   * Split at readiness. The frame record spans the load, and `Game.start()`
+   * builds the whole world synchronously — so the main thread is blocked and rAF
+   * cannot fire, which the recorder sees as one "frame" of 13 s warm and 242 s
+   * cold. That is a real and useful number, but it is a measure of the init
+   * block, not of a hitch while playing, and mixing the two makes the worst-frame
+   * figure meaningless in both directions.
+   */
+  const after = live ? load.frames.slice(load.marks.readyAtFrame ?? 0) : [];
+  const s = after.length ? settled(after) : null;
+  return {
+    wallMs: Date.now() - started,
+    recorded: load.frames.length,
+    afterReady: after.length,
+    firstFramesMs: load.marks.firstFrames ?? null,
+    sceneReadyMs: load.marks.sceneReady ?? null,
+    settledMs: s ? Math.round((load.marks.sceneReady ?? 0) + s.atMs) : null,
+    blockMs: live ? Math.max(...load.frames) : null,
+    worstAfterMs: after.length ? Math.max(...after) : null,
+    programs: load.programs,
+    errors: load.errors,
+    contextLost: load.contextLost,
+  };
 }
 
-async function run() {
+/** Seconds, or an em dash — never a zero standing in for "not measured". */
+const secs = (ms) => (ms === null || ms === undefined ? "—" : (ms / 1000).toFixed(1) + " s");
+
+const results = [];
+const profiles = [];
+
+async function main() {
   const { build, preview } = await import("vite");
   const { chromium } = await import("playwright");
+  await fs.mkdir(OUT_DIR, { recursive: true });
 
-  if (await portInUse(PORT)) throw new Error(`port ${PORT} is already in use; refusing to start`);
-
-  if (DO_BUILD) {
-    console.log("[coldload] building...");
-    assertPrivateBuildDir(ROOT, BUILD_DIR, "coldload");
-    await build({ root: ROOT, logLevel: "warn", build: { outDir: BUILD_DIR, emptyOutDir: true, minify: false } });
+  if (!flag("no-build")) {
+    const t = Date.now();
+    console.log("[cold] building");
+    await build({ root: ROOT, logLevel: "error", build: { outDir: BUILD_DIR, target: "es2022", sourcemap: false } });
+    console.log(`[cold] build: ${((Date.now() - t) / 1000).toFixed(1)} s`);
+    results.push({ label: "vite build", wallMs: Date.now() - t, kind: "build" });
   }
-  assertBuildIntact(ROOT, BUILD_DIR, "coldload", "the first cold load");
 
-  resources.server = await preview({
+  const server = await preview({
     root: ROOT,
-    logLevel: "warn",
     build: { outDir: BUILD_DIR },
     preview: { port: PORT, strictPort: true, host: "127.0.0.1", open: false },
   });
-  const base = `http://127.0.0.1:${PORT}/`;
-  console.log(`[coldload] preview on :${PORT}, ${N} cold loads, ready timeout ${(READY_TIMEOUT_MS / 1000).toFixed(0)}s`);
+  const url = `http://127.0.0.1:${PORT}/`;
+  console.log(`[cold] serving ${url}`);
 
-  resources.browser = await chromium.launch(launchOptions({}));
+  try {
+    for (let run = 1; run <= COLD_RUNS; run++) {
+      // A directory that has never seen this page: no HTTP cache, and no GPU
+      // program cache, which is the candidate this whole test exists to check.
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dawn-cold-"));
+      profiles.push(dir);
+      const ctx = await chromium.launchPersistentContext(dir, {
+        ...launchOptions(),
+        viewport: { width: 1600, height: 900 },
+      });
+      try {
+        const page = await ctx.newPage();
+        page.on("console", (m) => {
+          const t = m.text();
+          if (/error|fail|shader|lost/i.test(t) && m.type() !== "debug") console.log(`    page: ${t.slice(0, 160)}`);
+        });
 
-  const loads = [];
-  for (let i = 1; i <= N; i++) {
-    const before = await card();
-    // A fresh context per attempt: a new GPU surface and a cold shader cache
-    // for the page, which is what "cold load" has to mean here.
-    const context = await resources.browser.newContext({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
-    const page = await context.newPage();
-    let crashed = false;
-    const bad = [];
-    page.on("crash", () => (crashed = true));
-    page.on("response", (r) => {
-      if (r.status() >= 400) bad.push(`${r.status()} ${r.url()}`);
-    });
-    page.on("requestfailed", (r) => bad.push(`FAILED ${r.url()} ${r.failure()?.errorText ?? ""}`));
+        console.log(`\n[cold] run ${run}: COLD — brand new browser profile`);
+        const cold = await measure(page, url);
+        results.push({ label: `cold #${run} (new profile)`, ...cold });
+        report(cold);
+        if (run === 1 && !cold.failed) {
+          const gpu = await readGpuInfo(page);
+          console.log(`  GPU: ${gpu.renderer}`);
+          await assertSceneGpu(page, { tag: "cold", when: "after the cold load" });
+        }
 
-    let outcome = "ready";
-    let gpu = null;
-    const t0 = Date.now();
-    try {
-      await page.goto(base, { waitUntil: "load", timeout: 120_000 });
-      if (i === 1) {
-        gpu = await assertHardwareGpu(page, { tag: "coldload" });
-        if (isSoftwareRenderer(gpu?.renderer)) throw new Error(`software renderer: ${gpu.renderer}`);
+        // Same profile, same page: the HTTP cache and the GPU program cache are
+        // now both warm, so this is the repeat load Perf measured at ~21 s.
+        console.log(`[cold] run ${run}: WARM — same profile, reloaded`);
+        await page.evaluate(() => {
+          window.__SCENE_READY = false;
+        });
+        const warm = await measure(page, url);
+        results.push({ label: `warm #${run} (same profile, reload)`, ...warm });
+        report(warm);
+
+        // And once more with the HTTP cache bypassed but the profile — and so
+        // the shader cache — still warm. If this is fast, the bundle is not the
+        // cost and the shaders are.
+        console.log(`[cold] run ${run}: WARM, HTTP CACHE BYPASSED`);
+        const cdp = await ctx.newCDPSession(page);
+        await cdp.send("Network.enable");
+        await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
+        const nocache = await measure(page, url);
+        results.push({ label: `warm #${run}, no HTTP cache`, ...nocache });
+        report(nocache);
+      } finally {
+        await ctx.close().catch(() => {});
       }
-      await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: READY_TIMEOUT_MS });
-    } catch (e) {
-      const msg = String(e?.message ?? e).split("\n")[0];
-      outcome = crashed || /crash/i.test(msg) ? "crashed" : /Timeout|timeout/.test(msg) ? "timed-out" : `error: ${msg}`;
+
+      /**
+       * The condition that decides what we tell the user, and the one nothing
+       * else here can reach.
+       *
+       * Perf established that the penalty recurs in every fresh browser
+       * *process*, and reasoned from that to Chrome's per-profile on-disk
+       * program cache: Playwright throws its profile away on every launch, a
+       * real user keeps theirs. That is a good deduction and the README is
+       * about to be rewritten on the strength of it — telling the user the
+       * three-minute wait is a one-time cost they keep across restarts and
+       * reboots, rather than a toll they pay every session.
+       *
+       * But the deduction has never been tested, because testing it needs a
+       * profile directory that outlives a browser process, and every harness in
+       * this project discards the profile with the process. So the same
+       * directory is reopened here in a brand new browser: the process is cold,
+       * the profile is warm, and nothing else differs.
+       *
+       * Fast means the warmth is genuinely on disk and the kind advice is true.
+       * Slow means the warm state was only ever process-local memory, the
+       * per-profile cache is not what carries it, and the user pays three
+       * minutes *every time they open their browser* — which is the opposite of
+       * what we are about to promise them, and much worse to discover from a
+       * user than from a test.
+       */
+      console.log(`[cold] run ${run}: NEW PROCESS, WARM PROFILE — the same profile directory reopened`);
+      const again = await chromium.launchPersistentContext(dir, {
+        ...launchOptions(),
+        viewport: { width: 1600, height: 900 },
+      });
+      try {
+        const page = await again.newPage();
+        const survived = await measure(page, url);
+        results.push({ label: `new process #${run}, warm profile`, ...survived });
+        report(survived);
+      } finally {
+        await again.close().catch(() => {});
+      }
     }
-    const secs = +((Date.now() - t0) / 1000).toFixed(1);
-    const after = await card();
-    loads.push({ attempt: i, outcome, secs, cardBefore: before?.used ?? null, cardAfter: after?.used ?? null, gpuUtil: before?.util ?? null, nonOk: bad });
-    console.log(
-      `[coldload] ${i}/${N}: ${outcome} in ${secs}s   card ${before?.used ?? "?"} -> ${after?.used ?? "?"} MiB, gpu ${before?.util ?? "?"}%` +
-        (bad.length ? `   non-2xx: ${bad.join(", ")}` : "")
-    );
-    try {
-      await context.close();
-    } catch {
-      /* a crashed context can refuse to close; the attempt is already recorded */
-    }
+  } finally {
+    await server.close().catch(() => {});
   }
 
-  const verdict = evaluateColdLoads(loads, N);
-  const anyNonOk = loads.some((l) => l.nonOk.length);
-
-  console.log(`\n=================== cold loads (QUIET-HOST-PROTOCOL.md §2.1) ===================`);
-  for (const l of loads) console.log(`  ${l.attempt}. ${l.outcome.padEnd(11)} ${String(l.secs).padStart(6)}s   card ${l.cardBefore} -> ${l.cardAfter} MiB`);
-  console.log(`  reached ready   ${verdict.readyCount} / ${loads.length}`);
-  if (verdict.fastest !== null) console.log(`  repeat spread   ${verdict.fastest}s to ${verdict.slowest}s  (${verdict.ratio.toFixed(1)}x, limit 2.0x)`);
-  if (verdict.firstLoad !== null) {
-    // The number the user actually experiences: their run is a first load.
-    console.log(
-      `  FIRST LOAD      ${verdict.firstLoad}s` +
-        (verdict.firstLoadRatio ? `  (${verdict.firstLoadRatio.toFixed(1)}x the ${verdict.medianRepeat}s median repeat)` : "")
-    );
-    if (verdict.firstLoadRatio && verdict.firstLoadRatio > 2) {
-      console.log(`                  ^ the user's run IS a first load. A warm repeat time is not the figure that matters.`);
-    }
-  }
-  console.log(`  any non-2xx     ${anyNonOk ? "YES — see above" : "no"}`);
-  console.log(`  verdict         ${verdict.pass ? "PASS" : "FAIL"}`);
-  for (const p of verdict.problems) console.log(`    - ${p}`);
-  if (REHEARSAL) {
-    console.log(`\n  REHEARSAL: this was a test of the harness on a contended host. Every number`);
-    console.log(`  here is void by construction and must not be quoted as a result.`);
-  }
-  console.log(`================================================================================`);
-
-  await fs.mkdir(path.join(ROOT, "tools", "perf-out"), { recursive: true });
-  const file = path.join(ROOT, "tools", "perf-out", `coldload-${REHEARSAL ? "REHEARSAL-" : ""}${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
-  await fs.writeFile(file, JSON.stringify({ when: new Date().toISOString(), rehearsal: REHEARSAL, n: N, loads, verdict }, null, 2));
-  console.log(`[coldload] record: ${path.relative(ROOT, file)}`);
-
-  // A rehearsal on a contended host is expected to fail its criteria, so it must
-  // not report failure as if it were a result about the scene.
-  return REHEARSAL ? 0 : verdict.pass && !anyNonOk ? 0 : 1;
+  table();
 }
 
-await run().then(
-  (code) => shutdown(code),
-  (err) => shutdown(1, err?.stack ?? String(err))
-);
+function report(r) {
+  if (r.failed) {
+    console.log(`    FAILED after ${(r.wallMs / 1000).toFixed(1)} s — ${r.failed}`);
+    return;
+  }
+  console.log(
+    `    total ${secs(r.wallMs)} | scene-ready ${secs(r.sceneReadyMs)} | ` +
+      `main thread blocked ${r.blockMs === null ? "—" : (r.blockMs / 1000).toFixed(1) + " s"} in one go | ` +
+      `walkable ${r.settledMs === null ? (r.afterReady ? "never" : "not measured") : secs(r.settledMs)} | ` +
+      `worst frame after ready ${r.worstAfterMs === null ? "—" : r.worstAfterMs.toFixed(0) + " ms"} | ` +
+      `${r.programs} programs`
+  );
+  if (!r.recorded) console.log(`    WARNING the frame recorder produced no samples; walkability is unmeasured, not good`);
+  for (const e of r.errors) console.log(`    SYSTEM ERROR ${e}`);
+  if (r.contextLost) console.log(`    CONTEXT LOST ${JSON.stringify(r.contextLost)}`);
+}
+
+function table() {
+  console.log("\n[cold] ===================== summary =====================");
+  const pad = (s, n) => String(s).padEnd(n);
+  console.log(pad("condition", 34) + pad("total", 10) + pad("blocked", 11) + pad("walkable", 11) + "worst frame after ready");
+  for (const r of results) {
+    if (r.kind === "build") {
+      console.log(pad(r.label, 34) + pad((r.wallMs / 1000).toFixed(1) + " s", 10));
+      continue;
+    }
+    if (r.failed) {
+      console.log(pad(r.label, 34) + pad((r.wallMs / 1000).toFixed(1) + " s", 10) + "FAILED — " + r.failed);
+      continue;
+    }
+    console.log(
+      pad(r.label, 34) +
+        pad(secs(r.wallMs), 10) +
+        pad(secs(r.blockMs), 11) +
+        pad(r.settledMs === null ? (r.afterReady ? "never" : "—") : secs(r.settledMs), 11) +
+        (r.worstAfterMs === null ? "—" : r.worstAfterMs.toFixed(0) + " ms")
+    );
+  }
+
+  const cold = results.filter((r) => r.label?.startsWith("cold") && !r.failed);
+  const warm = results.filter((r) => r.label?.startsWith("warm #") && r.label.endsWith("reload)") && !r.failed);
+  const nocache = results.filter((r) => r.label?.includes("no HTTP cache") && !r.failed);
+  const survivors = results.filter((r) => r.label?.startsWith("new process") && !r.failed);
+  const mean = (a) => (a.length ? a.reduce((s, r) => s + r.wallMs, 0) / a.length / 1000 : null);
+  const c = mean(cold);
+  const w = mean(warm);
+  const n = mean(nocache);
+  const s = mean(survivors);
+  console.log("");
+  if (c && w) {
+    console.log(`[cold] cold mean ${c.toFixed(1)} s against warm mean ${w.toFixed(1)} s — ${(c / w).toFixed(1)}x`);
+    if (n) {
+      // A warm profile with the HTTP cache disabled still has the compiled
+      // shaders on disk; if that is fast, the bundle is not what makes a cold
+      // load cold.
+      console.log(
+        `[cold] warm with the HTTP cache disabled: ${n.toFixed(1)} s — ` +
+          (n < w * 1.5
+            ? "bundle transfer is NOT the cost, so the penalty is the GPU program cache or CPU-side first-run work"
+            : "bundle transfer is a material part of the cost")
+      );
+    }
+    if (s) {
+      // What the user is told hangs on this line.
+      const carries = s < w * 1.8;
+      console.log(
+        `[cold] new browser process against a warm profile: ${s.toFixed(1)} s — ` +
+          (carries
+            ? `the warmth SURVIVES a browser restart, so the wait is a one-time cost per profile ` +
+              `and the README's advice holds`
+            : `the warmth DOES NOT survive a browser restart (${(s / w).toFixed(1)}x the warm load), so it was ` +
+              `process-local, the per-profile cache is not what carries it, and the user pays this EVERY SESSION ` +
+              `— the README must not promise a one-time cost`)
+      );
+    } else if (survivors.length) {
+      console.log(`[cold] new browser process against a warm profile: every attempt FAILED, which is itself the answer`);
+    }
+  }
+  const failures = results.filter((r) => r.failed);
+  if (failures.length) console.log(`[cold] ${failures.length} of ${results.length - 1} loads failed outright`);
+}
+
+let code = 0;
+try {
+  await main();
+} catch (e) {
+  console.error(`\n[cold] FAILED: ${e.message}`);
+  code = 1;
+} finally {
+  for (const d of profiles) await fs.rm(d, { recursive: true, force: true }).catch(() => {});
+}
+process.exit(code);

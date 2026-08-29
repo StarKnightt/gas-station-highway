@@ -92,10 +92,34 @@ export const WIND = {
   strength: 0.35,
 };
 
-/** Sun: ~11 degrees elevation, low in the west-south-west. Direction *to* the sun. */
+/**
+ * The dawn sun.
+ *
+ * `elevation` was 11 degrees here while `LightingSystem` shipped 6.2, and the
+ * two were never reconciled because nothing in `src` reads this field — only
+ * `azimuth` is imported. So the disagreement was invisible inside the app and
+ * visible only to the CPU probes, which are the things that compute shadows:
+ * Vegetation found it and hard-coded 6.2 into `vegshadowfit.mjs` with a comment;
+ * Canopy's `probe-canopy.mjs` and `probe-shadowsource.mjs` are still reading 11
+ * and are therefore computing every shadow length 1.8x short.
+ *
+ * The general shape of this, which is worth more than the fix: **an unused
+ * constant cannot be wrong, so nothing corrects it, and the first consumer to
+ * arrive inherits a number that has never been checked against anything.** This
+ * one had been stale long enough that three tools had independently worked
+ * around it or been misled by it.
+ *
+ * Set to the shipped value. `LightingSystem` should import this rather than hold
+ * its own `SUN_ELEVATION_DEG`; that is its file to change and the constant is
+ * now correct to import.
+ *
+ * Consequences at 6.2 degrees that are easy to get wrong: a horizontal surface
+ * receives sin(6.2) = 10.8% of the beam, and a 4.72 m canopy deck throws its
+ * shadow 43.5 m rather than 24.3 m.
+ */
 export const SUN = {
   azimuth: Math.PI * 1.13,
-  elevation: (11.0 * Math.PI) / 180,
+  elevation: (6.2 * Math.PI) / 180,
 };
 
 /* ------------------------------------------------------------------ */
@@ -161,6 +185,15 @@ export const FORCE = (() => {
     "crown", "ruts", "fall", "ao", "wheel", "wheelviz", "driven", "patch",
     "paintviz", "noerode", "bleed", "aggro", "lotmat", "aisle", "noruts",
     "nochurn", "nohum",
+    // Controls for the two forecourt structure arms in siteOverlay.ts. Separate
+    // tokens because they act on the same surface by different mechanisms, and a
+    // single token could not tell which one was doing the work.
+    "noscrub", "nokerb",
+    // The forecourt pools. Zeroing the basins rather than the water, because
+    // the water level is derived from the basin floor: if only the shader arm
+    // went off, the height field would still carry two dishes and the control
+    // would not be a control of the whole feature.
+    "nofpool",
   ];
   const unknown = [...on].filter((k) => !KNOWN.includes(k));
   if (unknown.length) {
@@ -195,6 +228,9 @@ export const FORCE = (() => {
     aggro: on.has("aggro"),
     lotMat: on.has("lotmat"),
     aisle: on.has("aisle"),
+    noscrub: on.has("noscrub"),
+    nokerb: on.has("nokerb"),
+    fpool: on.has("nofpool") ? 0 : 1,
   };
 })();
 
@@ -282,6 +318,117 @@ export const LOW_SPOTS = [
 /** Drive lanes across the forecourt, where the pavement has settled into ruts. */
 const PAD_LANES = [14.7, 18.5, 21.3, 25.1];
 
+/**
+ * Standing water on the concrete forecourt.
+ *
+ * Separate from `LOW_SPOTS` for a mechanical reason and a design one. Mechanical:
+ * `LOW_SPOTS` is already at the four-pool ceiling `worldDetail` enforces, and it
+ * feeds the *asphalt* material; the forecourt is concrete and has its own four
+ * slots. Design: these are not lot hollows. They are a settled slab panel with a
+ * downpipe over it, which is a different object with a different shape.
+ *
+ * ## Why these two positions and not somewhere the camera looks harder
+ *
+ * A puddle is the only feature in this system that can read on the forecourt at
+ * all. Everything else here is albedo, and albedo detail is bounded by the light
+ * falling on the surface — measured at 41 luma with 7% of range of spread, which
+ * is why a round of forecourt grime rendered correctly and was invisible. A pool
+ * is specular, so it is bounded by the light falling on *what it reflects*: a
+ * mirror of a 150-luma sky is a bright feature on a dark surface no matter how
+ * little light lands on it. That is the whole argument for this feature.
+ *
+ * It only works if the mirror direction lands on something bright, which is
+ * geometry and was settled before any of this was written (`tools/poolsite.mjs`).
+ * Three results decided the placement:
+ *
+ * 1. **The mirror ray escapes the canopy.** For a horizontal pool the reflected
+ *    ray leaves *away* from the viewer, rising at the same angle the view
+ *    descended — so it must travel `4.72 * distance / eyeHeight` to reach soffit
+ *    height, which at walking distances is 11 to 60 m, against 2.4 to 8.1 m of
+ *    deck left to cross. The soffit is only reflected by a pool within about
+ *    4.5 m of the camera, where Fresnel is 10% anyway. A wide but *low* roof is
+ *    easy for a grazing ray to get out from under.
+ * 2. **Near-vertical views get nothing and grazing views get everything.**
+ *    Fresnel for water runs 11% at 22 degrees and 62% at 5 degrees, so a pool
+ *    wants to be 12 to 20 m from the stance, not at its feet. Both of these are.
+ * 3. **The forecourt has no closed basin.** Its 130 mm of relief is monotone
+ *    crown and cross-fall; a flood fill from any point on it escapes the site.
+ *    So the dish has to be authored — a water level on the existing slab would
+ *    drain to the desert.
+ *
+ * ## Why water stands *here*, on a crowned slab that is built to shed it
+ *
+ * Three independent reasons coincide at this band, which is why it is this band
+ * and not a spot chosen for the camera:
+ *
+ * - The crown peaks at z = 24.45, inside the forecourt, so its z-gradient passes
+ *   through zero here. This is the flattest ground on the slab.
+ * - Island 2's north face at z = 23.8 is a kerb across the flow, and flow is
+ *   toward -z down the crown, so this is the *upstream* side: the side a dam
+ *   ponds on.
+ * - Canopy's columns carry an internal downpipe ending in a discharge shoe
+ *   140 mm above the plinth, and the two island-2 columns stand at x = +-3.5.
+ *   Water is delivered here from 180 m2 of deck whether or not rain reaches the
+ *   ground under the canopy — which matters, because the shelter arm in
+ *   `worldDetail` deliberately keeps this area drier than the open apron.
+ *
+ * The northern fuelling lane's wheel rut also runs through at z = 24.25, so the
+ * authored depth is small: it deepens a depression that is already there.
+ *
+ * ## Inscribed in one slab panel, deliberately
+ *
+ * The panel grid is 6 x 4 with 55 mm saw cuts, and the cuts are filled by a
+ * different material that carries no water arm — so a pool crossing a cut would
+ * draw a dry line through its own middle. Fitting it inside a panel is not a
+ * workaround: slabs settle as units, so a panel boundary is exactly where real
+ * ponding stops. Panel x edges are at 0 and +-3.87; both pools clear them by
+ * more than 300 mm.
+ *
+ * `depth` is the dish in the height field. `water` is how far the level sits
+ * above the *measured* floor of that dish — measured rather than authored, so
+ * that a later change to the crown, the ruts or the undulation cannot silently
+ * lift the level out of its basin. See `forecourtPoolLevel`.
+ */
+/**
+ * The depth at which water on the forecourt slab stops showing its dish and
+ * behaves as a surface — `worldDetail`'s `mirrorDepth` for the concrete.
+ *
+ * Here rather than beside the material because `tools/poolsite.mjs` has to
+ * report what fraction of each pool is past this ramp, and that report is the
+ * only thing standing between a pool and shipping as a damp patch. One number
+ * read by both the material and the probe; two numbers is how the probe comes to
+ * certify something the renderer is not doing.
+ *
+ * 5 mm rather than asphalt's 20 mm because a float-finished slab has
+ * sub-millimetre relief, so a few millimetres of water already submerges the
+ * substrate's microsurface. See the parameter's own note for the full argument.
+ */
+export const FORECOURT_MIRROR_DEPTH = 0.005;
+
+export const FORECOURT_POOLS = (FORCE.fpool
+  ? [
+  // East pool, under the x = +3.5 column shoe. The one that reads from a stance
+  // west of the islands looking across them: 12.7 m out, 7.3 degrees, Fresnel
+  // 51%, and 13.5 degrees off the view axis.
+      { x: 1.95, z: 24.6, rx: 1.6, rz: 1.05, depth: 0.042, water: 0.028 },
+  // West pool, under the x = -3.5 column shoe. Smaller, and its mirror
+  // direction from a stance heading for the store runs north-west into the
+  // building's sunlit south face rather than into open sky — structured content,
+  // which is what the last round of pools lacked.
+      { x: -2.3, z: 24.32, rx: 1.25, rz: 0.66, depth: 0.032, water: 0.021 },
+    ]
+  : // Emptied rather than zeroed, and that is the whole point of the control
+    // arm being here instead of at the material.
+    //
+    // Zeroing only the dish depth would have left the water levels in place, and
+    // those are derived from the *measured* floor of the dish — so with the dish
+    // gone the level would sit 28 mm above a nearly flat panel and flood it. The
+    // forced-off arm would then have produced a larger and more obvious feature
+    // than the feature it was supposed to remove: a control that cannot fail in
+    // the other direction, which is the same class of defect as a control that
+    // cannot fail at all.
+    []) as { x: number; z: number; rx: number; rz: number; depth: number; water: number }[];
+
 export function padY(x: number, z: number): number {
   const t = (z - PAD.minZ) / (PAD.maxZ - PAD.minZ);
   const crown = Math.sin(Math.PI * Math.min(1, Math.max(0, t))) * 0.145 * FORCE.crown;
@@ -306,8 +453,53 @@ export function padY(x: number, z: number): number {
     const r = Math.hypot((x - s.x) / s.rx, (z - s.z) / s.rz);
     if (r < 1) dip += trough(r, 1, s.depth * FORCE.fall);
   }
+  // The forecourt dishes. Not scaled by FORCE.fall: `fall` is a x12 debug
+  // exaggeration of the site's drainage relief, and a 456 mm puddle basin under
+  // it would be a hole rather than a louder version of the same thing.
+  // `?force=nofpool` empties the list rather than zeroing the depth here.
+  for (const s of FORECOURT_POOLS) {
+    const r = Math.hypot((x - s.x) / s.rx, (z - s.z) / s.rz);
+    if (r < 1) dip += trough(r, 1, s.depth);
+  }
 
   return PAD.y + grade(x) + crown + lateral + ruts + dip + undulation(x, z, 0.115);
+}
+
+/**
+ * The absolute world Y of a forecourt pool's water surface.
+ *
+ * Takes the surface function rather than assuming one, and the caller must pass
+ * the *same* function it built the mesh from. This is the single most expensive
+ * mistake available here: the entrance rut strips were authored against `dirtY`
+ * while the mesh is built from `groundHeight`, the two disagree by up to 0.65 m
+ * exactly across the entrance band, and the feature measured as doing literally
+ * nothing. A water level is worse than a rut, because it is compared against the
+ * rendered surface *per fragment* — get the reference wrong by 20 mm and the pool
+ * either floods the whole panel or does not exist, with no error either way.
+ *
+ * The floor is measured on a grid rather than read at the centre, because the
+ * centre is not the deepest point: the northern lane's wheel rut runs through
+ * both dishes at z = 24.25, and `undulation` puts another 115 mm term on top at a
+ * phase nobody controls. Sampling means the level tracks the basin if anyone
+ * changes the crown, the ruts or the lane positions.
+ */
+export function forecourtPoolLevel(
+  p: (typeof FORECOURT_POOLS)[number],
+  surface: (x: number, z: number) => number
+): number {
+  let floor = Infinity;
+  const step = 0.04;
+  for (let dz = -p.rz; dz <= p.rz; dz += step) {
+    for (let dx = -p.rx; dx <= p.rx; dx += step) {
+      // Inside the dish only. Sampling the enclosing rectangle would pick up the
+      // undipped rim in the corners, which is the highest ground in the footprint
+      // and would put the level above it — flooding the panel.
+      if (Math.hypot(dx / p.rx, dz / p.rz) > 0.85) continue;
+      const y = surface(p.x + dx, p.z + dz);
+      if (y < floor) floor = y;
+    }
+  }
+  return floor + p.water;
 }
 
 /**

@@ -28,21 +28,329 @@
         border: 1px solid #ffffff1a; text-align: center;
       }
       #hud.hidden { display: none; }
-      #loading {
-        position: fixed; inset: 0; display: grid; place-items: center;
-        font: 500 14px ui-sans-serif, system-ui, sans-serif; color: #a9998a;
-        background: #0b0a0c; transition: opacity .5s ease;
+
+      /* Kept deliberately. Zero-size, but NOT empty: src/core/loadingScreen.ts
+         mirrors the live status text into it for the three probe harnesses
+         that read it. `Game` removes it on rendered frame 2, and
+         `tools/coldload.mjs` times the first frame by watching for exactly
+         that removal — deleting the element would silently break a
+         measurement rather than break a build. The *visible* loading screen is
+         #boot below, which dismisses on `scene-ready` instead: four frames
+         later, but the one signal that means the scene is actually walkable.
+         Full dependent list on the element itself, in <body>. */
+      #loading { position: fixed; width: 0; height: 0; overflow: hidden; }
+
+      /* ---- boot overlay -------------------------------------------------
+         Driven entirely from src/core/loadingScreen.ts. Everything that has
+         to keep moving while procedural generation blocks the main thread is
+         a transform or an opacity animation, because those run on the
+         compositor thread and a main-thread timer does not. See the header
+         comment in that file. */
+      #boot {
+        position: fixed; inset: 0; z-index: 40; display: grid; place-items: center;
+        background: #0b0a0c;
+        font: 400 14px/1.55 ui-sans-serif, system-ui, sans-serif;
+        color: #8a7a6d; -webkit-font-smoothing: antialiased;
       }
-      #loading.done { display: none; }
+      /* The horizon this scene is named after, at about the elevation the sun
+         sits at in it. Restrained on purpose: it is a hint of the frame that
+         is coming, not a splash screen competing with it. */
+      #boot .boot-sky {
+        position: absolute; inset: 0; pointer-events: none;
+        background:
+          radial-gradient(128% 74% at 50% 122%, #6b3a1c 0%, #38200f 26%, #1a1113 52%, #0b0a0c 78%),
+          linear-gradient(#0b0a0c 0%, #0b0a0c 100%);
+      }
+      #boot .boot-card { position: relative; width: min(540px, 80vw); }
+      #boot .boot-title {
+        font-size: 12px; letter-spacing: .34em; text-transform: uppercase;
+        color: #d9c3ab; margin-bottom: 4px;
+      }
+      #boot .boot-sub { font-size: 13px; color: #7b6a5e; margin-bottom: 26px; }
+
+      #boot .boot-bar {
+        position: relative; height: 2px; background: #ffffff14; overflow: hidden;
+      }
+      #boot .boot-fill {
+        position: absolute; inset: 0; transform-origin: 0 50%; transform: scaleX(0);
+        will-change: transform;
+        background: linear-gradient(90deg, #7a4526 0%, #c8722f 62%, #ffa963 100%);
+      }
+      /* The shader-compile stage has no honest percentage, so the bar says so
+         with motion instead of a number. */
+      #boot.indeterminate .boot-bar::after {
+        content: ""; position: absolute; inset: 0; width: 34%;
+        background: linear-gradient(90deg, #ffa96300, #ffc79b99, #ffa96300);
+        animation: boot-sweep 2.4s ease-in-out infinite;
+      }
+      @keyframes boot-sweep {
+        from { transform: translateX(-120%); }
+        to   { transform: translateX(360%); }
+      }
+
+      #boot .boot-row {
+        display: flex; align-items: baseline; justify-content: space-between;
+        gap: 16px; margin-top: 12px; font-size: 13px;
+      }
+      #boot .boot-step { color: #c3ae99; }
+      #boot .boot-meta {
+        display: flex; align-items: center; gap: 9px;
+        font-variant-numeric: tabular-nums; color: #6d5e53; white-space: nowrap;
+      }
+      #boot .boot-pct { min-width: 54px; text-align: right; }
+      /* Compositor-driven, and the only thing on screen that is guaranteed to
+         keep moving if the main thread is blocked for eleven seconds. If this
+         stops, the tab is gone; if it beats while everything else is still,
+         the page is busy. */
+      #boot .boot-dot {
+        width: 5px; height: 5px; border-radius: 50%; background: #ffa963;
+        will-change: transform, opacity;
+        animation: boot-beat 1.7s ease-in-out infinite;
+      }
+      @keyframes boot-beat {
+        0%, 100% { opacity: .18; transform: scale(.8); }
+        50%      { opacity: 1;   transform: scale(1.15); }
+      }
+      /* Only shown during shader compilation, and it is STATIC TEXT on purpose.
+         Measured on a cold load: that stage is 187.9 s of a 205.8 s load
+         (91.3%) and the compositor manages 156 frames in it — 0.83 fps, with
+         gaps up to 4.94 s. No animation reads at that rate, so the heartbeat
+         and the clock, which carry liveness perfectly well during init (241
+         frames in terrain's 10 s), cannot carry it here. Nothing on the page
+         can: the driver has the GPU. The only thing that still works when the
+         picture is frozen for five seconds is a sentence that predicted it. */
+      #boot .boot-hint { display: none; margin-top: 8px; font-size: 12.5px; color: #6d5e53; }
+      #boot.indeterminate .boot-hint { display: block; }
+
+      #boot .boot-clock { display: inline-block; height: 15px; overflow: hidden; }
+      #boot .boot-clock-strip { display: block; will-change: transform; }
+      #boot .boot-clock-strip i {
+        display: block; height: 15px; line-height: 15px; font-style: normal;
+        text-align: right;
+      }
+
+      /* Both notices are revealed by a pure CSS animation-delay rather than by
+         a timer, for the same reason as the heartbeat: the moment they are
+         most needed is the moment no JavaScript is able to run.
+
+         30 s, because the measured warm loads span 20.8–25.7 s (21.9 s worst
+         of Perf's three sequences, 25.7 s on the contended run that produced
+         shots/boot/warm) and a repeat load must never be told it is slow. It
+         is also only 11% of the way into the worst measured cold load
+         (273.3 s), so the reassurance still arrives early in the wait it
+         exists for. The second notice is at 90 s: 3.5x the worst warm load,
+         which no non-cold load has ever come close to. */
+      #boot .boot-note {
+        margin-top: 22px; font-size: 12.5px; line-height: 1.6; color: #8d7666;
+        border-left: 1px solid #ffa96340; padding-left: 12px;
+        opacity: 0; animation: boot-reveal .8s ease-out 30s forwards;
+      }
+      #boot .boot-note.late { margin-top: 10px; animation-delay: 90s; }
+      @keyframes boot-reveal { to { opacity: 1; } }
+
+      #boot .boot-fail[hidden] { display: none; }
+      #boot .boot-fail {
+        margin-top: 20px; font-size: 12.5px; line-height: 1.6;
+        color: #ffb9ab; border-left: 1px solid #ff6b5b80; padding-left: 12px;
+      }
+      #boot.failed .boot-fill { background: #7a2b22; }
+      /* The only non-diegetic UI in the scene, and deliberately the smallest
+         thing that works. Driven entirely from src/systems/reticle.ts; nothing
+         else in the page touches these classes.
+
+         #reticle itself is a zero-size anchor at the screen centre and draws
+         nothing — the dot and the prompt are both children of it. That is
+         load-bearing in two ways rather than tidiness:
+
+           1. `tools/walkprobe.mjs` suppresses page overlays for its reference
+              frames by setting `visibility: hidden` on an enumerated list of
+              ids, and #reticle is on it. `visibility` inherits, so the prompt
+              is suppressed by that existing list with no edit to another
+              agent's harness — and so is anything added in here later.
+           2. `.reach` scales the dot. With the prompt as a sibling *inside*
+              the anchor rather than inside the dot, the text does not inherit
+              that scale, so the two can share one 110 ms curve without the
+              wording jumping size. */
+      #reticle {
+        position: fixed; left: 50%; top: 50%; width: 0; height: 0;
+        pointer-events: none; display: none;
+      }
+      #reticle.shown { display: block; }
+
+      /* The dark ring is not decoration: a pure-white dot vanishes against the
+         dawn sky, and a pure-dark one vanishes against asphalt, so the mark has
+         to carry both values itself. Measured at 57.9/255 peak contrast against
+         sky, 70.6 against tarmac and 68.5 against the bright side of the sun. */
+      #reticle .dot {
+        position: absolute; left: -4px; top: -4px;
+        width: 6px; height: 6px; box-sizing: content-box; border-radius: 50%;
+        background: #ffffff4d; border: 1px solid #00000059;
+        transition: background-color .11s ease-out, border-color .11s ease-out,
+                    transform .11s ease-out;
+      }
+      #reticle.reach .dot {
+        background: #ffffffec; border-color: #00000080; transform: scale(1.45);
+      }
+
+      /* One line, no panel, no border, no icon — the verb and the key and
+         nothing else. Warm off-white out of the same palette as #boot's title
+         (#d9c3ab) and the HUD card (#f2e6d8) rather than a UI grey, so it reads
+         as belonging to the dawn rather than to a game.
+
+         The three-layer text-shadow is the dot's dark-ring trick applied to
+         type, and it is sized from a measurement rather than by eye. The first
+         version used two layers with a 7 px outer blur, which read beautifully
+         over the pump cabinet (181/255 peak contrast against luma 30) and
+         almost vanished over the storefront's aluminium door frame and the
+         cooler glazing (91 and 65 against luma 178 and 151) — two of the three
+         things in this station you can actually use. Warm off-white on bright
+         brushed metal is 44 luma of separation on its own; the halo has to
+         supply the rest, and a wide thin blur spreads its darkness too far to
+         do it.
+
+         So: a hard 1 px offset for baseline definition, a *tight* 2 px ring at
+         90% for glyph separation against light fields, and a 6 px soft pass to
+         sink the whole line into a bright sky. All three are shadows on the
+         letterforms, not a plate behind them, so there is still no box on
+         screen. */
+      #reticle .prompt {
+        position: absolute; left: 0; top: 19px;
+        transform: translate(-50%, 2px);
+        white-space: nowrap;
+        font: 400 12.5px/1 ui-sans-serif, system-ui, sans-serif;
+        letter-spacing: .075em; color: #ecdcc9;
+        text-shadow: 0 1px 1px #000000f2, 0 0 2px #000000e6, 0 0 6px #000000b3;
+        opacity: 0;
+        transition: opacity .11s ease-out, transform .11s ease-out;
+      }
+      #reticle.reach .prompt { opacity: .88; transform: translate(-50%, 0); }
     </style>
   </head>
   <body>
-    <div id="loading">generating surfaces&hellip;</div>
+    <!-- Zero-size status mirror; see the #loading rule above for why it stays.
+
+         DO NOT REMOVE THIS ELEMENT, and do not "tidy" it into #boot. Seven
+         things depend on it and every one of them fails silently, not loudly:
+
+           src/core/Game.ts:435        removes it on rendered frame 2
+           src/core/loadingScreen.ts   WRITES the live status text into it, and
+                                       is the only writer. See the note on
+                                       STATUS_MIRROR_ID in that file.
+           tools/coldload.mjs:96       times FIRST FRAME by watching for that
+                                       removal via MutationObserver. If this
+                                       element never exists, the observer never
+                                       fires and the harness reports a
+                                       first-frame time of `undefined` while
+                                       otherwise succeeding.
+           tools/bootshots.mjs         asserts presence/absence during boot AND
+                                       asserts this mirror is non-empty and
+                                       changing, so the silent break below
+                                       cannot recur undetected
+           tools/lightProbe.mjs:78     |  print its textContent as their
+           tools/reticleprobe.mjs:235  |  diagnostic when a load fails
+           tools/shoot7.mjs:221        |
+
+         RESOLVED 2026-08-29, and worth keeping as the worked example. For one
+         round this element was empty and nothing wrote to it, so those last
+         three printed `""` in precisely the failure case they exist for.
+         `textContent` on an empty div is `""` and not null, so every
+         truthiness guard and optional chain passed: the diagnostic degraded to
+         silence with no error logged anywhere.
+
+         loadingScreen.ts now mirrors its live step label here, so those three
+         are correct again with no edit, and are better off than before — a
+         hung load names the system it hung in ("shaping the ground") instead
+         of the old constant "generating surfaces…". Deliberately the live
+         label and not only the failure message: all three fire when
+         __SCENE_READY never arrives, and a hang inside terrain.init() never
+         reaches reportBootFailure, so a failure-only mirror would still have
+         printed "" for the common case. -->
+    <div id="loading"></div>
+    <!-- Static markup rather than DOM built in script, so the first paint of
+         the overlay does not wait for the module bundle to parse. The bundle
+         only takes it over. -->
+    <div id="boot" role="status" aria-live="polite">
+      <div class="boot-sky"></div>
+      <div class="boot-card">
+        <div class="boot-title">Dawn Station</div>
+        <div class="boot-sub">Nothing here is downloaded &mdash; the whole scene is being generated.</div>
+        <div class="boot-bar"><div class="boot-fill"></div></div>
+        <div class="boot-row">
+          <span class="boot-step">starting up</span>
+          <span class="boot-meta">
+            <span class="boot-pct"></span>
+            <span class="boot-dot" aria-hidden="true"></span>
+            <span class="boot-clock" aria-hidden="true"><span class="boot-clock-strip"></span></span>
+            <span class="boot-unit">s</span>
+          </span>
+        </div>
+        <div class="boot-hint">
+          The picture may hold still for a few seconds at a time while it does. That is
+          the graphics card being busy, not the page having stopped.
+        </div>
+        <div class="boot-note">
+          The first load after a change is slow, and almost all of it is your graphics
+          driver compiling this scene&rsquo;s shaders &mdash; measured at 188 seconds of
+          a 206 second first load, against 18 seconds to generate every surface, mesh
+          and texture. It is kept on disk afterwards, which is why loading a second time
+          takes about twenty seconds. This is expected, not an error.
+        </div>
+        <div class="boot-note late">
+          Still working. A first load on this machine has been measured at four and
+          a half minutes. The counter on the right is live even while the page is
+          busy, so if it is still climbing this has not hung.
+        </div>
+        <div class="boot-fail" hidden></div>
+      </div>
+    </div>
+    <!-- ADDING AN OVERLAY? Read NOTES.md case 81 first.
+         Screenshots here photograph the page clipped to the canvas, so every
+         harness hides an enumerated list of overlay ids before it shoots
+         (tools/walkprobe.mjs, bootshots.mjs, reticleprobe.mjs, shoot7.mjs).
+         A new top-level element needs an entry in each of those — but they hide
+         with `visibility`, which **inherits**, so anything nested inside an
+         element already on the list is covered by the existing entry with no
+         harness edit at all. That is why the interaction prompt lives inside
+         #reticle rather than beside it. -->
     <div id="hud" class="hidden">
+      <!-- The scene is deliberately diegetic: InteractionSystem publishes no
+           crosshair, no prompt and no highlight, on the reasoning that the only
+           affordance should be standing in front of something real. That holds
+           up while you are walking around, but it left this card saying "click
+           to look around" as the only thing a first-time player is ever told
+           about the mouse — so a click on a pump reads as a misfire rather than
+           as the way the world works. This card is shown *before* the player
+           takes control and hidden the moment they do, so naming the three
+           things here costs nothing on screen during play. -->
       <div class="card">
         <div>Click to look around</div>
-        <div style="opacity:.6;font-size:13px;margin-top:6px">WASD to walk &middot; Esc to release</div>
+        <div style="opacity:.6;font-size:13px;margin-top:6px">
+          WASD to walk &middot; Shift to hurry &middot; Space to hop &middot; Esc to release
+        </div>
+        <div style="opacity:.6;font-size:13px;margin-top:10px">
+          Walk up to a pump, the shop door or a fridge<br />and press E &mdash; or click &mdash; to use it
+        </div>
       </div>
+    </div>
+    <!-- Idle it is a faint aiming point and nothing else. When
+         InteractionSystem's reach ray is on something usable the dot brightens
+         and the prompt fades in naming the specific action — "press E to start
+         the pump", not "interact" — because the specificity is the entire
+         reason for having text at all.
+
+         The wording is written by src/systems/reticle.ts from the same `pick()`
+         result that decides what a click and what the E key will hit, so the
+         dot, the words, the key and the mouse cannot disagree about what is in
+         reach or about which verb applies.
+
+         Empty here on purpose: no wording is authored in this file, so there is
+         no second copy of it to drift out of step with the actions. Both
+         children are display-gated by #reticle, which is only shown under
+         pointer lock, so neither can appear in a screenshot of the unlocked
+         state. -->
+    <div id="reticle" aria-hidden="true">
+      <i class="dot"></i>
+      <span class="prompt"></span>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

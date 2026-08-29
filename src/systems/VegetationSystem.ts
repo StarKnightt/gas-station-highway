@@ -13,13 +13,14 @@ import {
   type LitterStats,
 } from "../gen/vegLitter";
 import { HORIZON_BANDS, SKY_HAZE } from "../gen/vegHorizonBands";
-import { applyFoliageTransmission } from "../gen/vegTransmission";
+import { applyFoliageTransmission, type TransmissionOptions } from "../gen/vegTransmission";
 import { buildPine, foliageCardGeometry, type FoliageCard } from "../gen/vegPine";
 import { buildFence, buildPoleLine } from "../gen/vegProps";
 import { buildClump, clumpForm, CLUMP_CARD, CLUMP_KINDS, type ClumpKind } from "../gen/vegScrub";
 import { buildSage, buildThistle, midStoreySites, openGroundSites } from "../gen/vegMidstorey";
 import {
   buildMatSheet,
+  makeRoadFringeRegion,
   matSheetMaterial,
   scatterSprigs,
   thatchSprigGeometry,
@@ -241,6 +242,16 @@ export class VegetationSystem implements GameSystem {
     height: number;
   }[] = [];
 
+  /**
+   * The scrub clumps, kept so they can be published for measurement.
+   *
+   * Held as the scatter's own type rather than flattened to x/z/height like
+   * `plantSites`: `size`, `tall` and `wide` are what decide whether a clump
+   * subtends pixels at 90 m, and a density measured without them cannot tell a
+   * fringe from a row of specks.
+   */
+  private clumpSites: ScrubSite[] = [];
+
   /** Mid-storey positions, so the ground-contact pass can darken their bases. */
   private midContact: [number, number][] = [];
   private soil: SoilQuery | null = null;
@@ -248,10 +259,30 @@ export class VegetationSystem implements GameSystem {
   private matSprigsEnabled = true;
   /** `?vforce=nowire` — fence and pole wires omitted, to identify their pixels. */
   private wiresEnabled = true;
+  /** `?vforce=nofringe` — the road-fringe sheet omitted, to find the handover seam. */
+  private fringeEnabled = true;
+  /** `?vforce=nocorridor` — the far clusters along the highway omitted. */
+  private corridorEnabled = true;
+  /** `ctx.quality.transmission` — false drops the foliage transmission program. */
+  private transmitEnabled = true;
+
+  /**
+   * The single place the transmission hook is installed, so the tier gate cannot
+   * be honoured at three call sites and missed at the fourth.
+   *
+   * A missed site is not a cosmetic slip: it keeps its program, so the count
+   * barely moves and the tier reads as "applied, small effect" rather than as
+   * broken. Routing every caller through one method makes that failure a
+   * compile error instead of a measurement to squint at, and `grep
+   * applyFoliageTransmission` should find only the import and this line.
+   */
+  private maybeTransmit<T extends THREE.Material>(mat: T, opts: TransmissionOptions): T {
+    return this.transmitEnabled ? applyFoliageTransmission(mat, opts) : mat;
+  }
   private wireMats: THREE.ShaderMaterial[] = [];
 
   init(ctx: SystemContext): void {
-    const { scene, game } = ctx;
+    const { scene, game, quality } = ctx;
     const q = new URLSearchParams(location.search);
     const force = new Set((q.get("vforce") ?? "").split(",").filter(Boolean));
     // An unrecognised token used to be ignored in silence. I typed
@@ -269,6 +300,15 @@ export class VegetationSystem implements GameSystem {
       // are different primitives answering different complaints, and a control
       // that removes both cannot tell me which one a frame is showing.
       "nolitter",
+      // The two layers added in the density round, each removable on its own.
+      //
+      // `nofringe` drops the road-fringe sheet and leaves the near disc, which
+      // is the only way to see the seam where they hand over: a frame with both
+      // and a frame with one differ exactly by the fringe's pixels, and a seam
+      // is a local excess in that difference. `nocorridor` drops the 34 clusters
+      // along the highway, which is how "are they sub-pixel at 230 m" gets a
+      // pixel answer instead of an arithmetic one.
+      "nofringe", "nocorridor",
     ]);
     for (const f of force) {
       if (!KNOWN.has(f)) {
@@ -294,6 +334,12 @@ export class VegetationSystem implements GameSystem {
     // impossible-arithmetic tell from NOTES, and it caught a broken instrument
     // before it was read as "the wires are invisible".
     this.wiresEnabled = on("wire");
+    // Same placement argument as the wires: both of these gate things built
+    // further down, so they are set here where `on` is defined rather than next
+    // to their use, and both are echoed in the report so a capture can assert
+    // the flag arrived rather than assuming a null result means "no effect".
+    this.fringeEnabled = on("fringe");
+    this.corridorEnabled = on("corridor");
 
     const ground = game.tryGet<Ground>("groundHeight");
     if (!ground) throw new Error('VegetationSystem: no "groundHeight" service — must init after TerrainSystem');
@@ -381,13 +427,37 @@ export class VegetationSystem implements GameSystem {
      */
     const transScale = num("vtrans", 1);
     this.report.transScale = transScale;
+
+    /*
+     * Compile-time tier gate. Distinct from `?vforce=`, deliberately.
+     *
+     * `vforce` tokens are debug controls: they answer "which pixels are this
+     * layer's" and they exist to be flipped inside one round. This is a
+     * capability decision taken once at boot from `ctx.quality`, and it is the
+     * only thing in this system that pulls the *compile-time* cost family.
+     * Conflating the two would put a tier decision behind a debug flag and a
+     * debug flag in front of a shipped experience, so they stay separate names
+     * with separate defaults and neither reads the other.
+     *
+     * Setting `transScale = 0` would NOT do this job, and that is the trap worth
+     * naming: a zero strength still installs `onBeforeCompile`, still sets a
+     * `customProgramCacheKey`, and therefore still costs a program link. The
+     * saving is only available by not installing the hook at all, so the gate
+     * has to sit here and not inside the shader.
+     *
+     * At `high` this is `true` and the expression below is the byte-identical
+     * previous path — same call, same options, same cache key.
+     */
+    this.transmitEnabled = quality.transmission;
+    this.report.transmission = quality.transmission;
+    this.report.tier = quality.tier;
     const transmissionFor = <T extends THREE.Material>(
       mat: T,
       tint: THREE.Color,
       strength: number,
       fill = 0.55
     ) =>
-      applyFoliageTransmission(mat, {
+      this.maybeTransmit(mat, {
         sun: sunDirection,
         sunColour: sunGlow,
         tint,
@@ -706,13 +776,27 @@ export class VegetationSystem implements GameSystem {
       this.report.pines = PINES.length;
       this.report.pineTriangles = wood.index ? wood.index.count / 3 : 0;
 
-      const cardGeo = foliageCardGeometry(3);
-      this.geometries.push(cardGeo);
       for (const [set, tex, label] of [
         [live, shootLive, "veg-pine-foliage"],
         [dead, shootDead, "veg-pine-deadfoliage"],
       ] as const) {
         if (!set.length) continue;
+        /*
+         * One geometry per mesh, where these two shared one.
+         *
+         * Sharing was free until the tier lever started permuting instance order
+         * to make thinning sample a layer instead of truncating it: a geometry
+         * used by two instanced meshes would be permuted twice and the second
+         * permutation would not match the first mesh's matrices, so the lever
+         * correctly refuses to shuffle either. A refusal is silent — the meshes
+         * still thin, just in generation order, which for pine cards is
+         * tree-by-tree and would delete whole crowns rather than thinning them.
+         *
+         * Three quads duplicated is not a cost worth defending against that, and
+         * the alternative fix lives in someone else's file.
+         */
+        const cardGeo = foliageCardGeometry(3);
+        this.geometries.push(cardGeo);
         const mat = magenta
           ? magentaMat()
           : transmissionFor(
@@ -1025,7 +1109,33 @@ export class VegetationSystem implements GameSystem {
       // census says 45.6% of the near field still has nothing above ankle, so
       // opening holes is the one thing this must not do. Net effect is fewer
       // instances and *more* covered ground.
-      const sites = scatterScrub(ground, blocked, postAnchors, num("vdens", 0.74));
+      /*
+       * The tier is honoured **at generation**, not by lowering `count` after.
+       *
+       * Every sub-population inside `scatterScrub` gates on `densityScale`, so
+       * one multiply thins the shoulder ribbon, the seam weeds, the mid clusters
+       * and all three far groups together. Building fewer saves init time and
+       * memory as well as frametime, where lowering `count` afterwards saves only
+       * frametime — the geometry, the matrices and the instance buffers have all
+       * been paid for by then.
+       *
+       * `Game` must therefore not apply the tier factor to these meshes a second
+       * time; `userData.tierScatterApplied` below is that contract, and without
+       * it `low` would land at 0.25 x 0.25 and delete the far scrub. Runtime
+       * adaptation still applies to them, which is the point of the marker being
+       * per-mesh rather than an exemption.
+       *
+       * Byte-identical at `high`: `scatterDensity` is 1 there, multiplying by 1.0
+       * is exact, and the rng stream is untouched because these are acceptance
+       * gates — one draw per candidate whatever the threshold.
+       */
+      const scrubDensity = num("vdens", 0.74) * quality.scatterDensity;
+      this.report.scrubDensity = scrubDensity;
+      const sites = scatterScrub(ground, blocked, postAnchors, scrubDensity, 2718, {
+        corridor: this.corridorEnabled,
+      });
+      this.clumpSites = sites;
+      this.report.corridorOff = !this.corridorEnabled;
       this.addGroundContact(sites, postAnchors, ground, on("ground"), this.debrisContext(game));
       // The scattered half, after the decal half, because it is meant to be
       // seen lying on it and its height offset is written against the decal's.
@@ -1129,6 +1239,12 @@ export class VegetationSystem implements GameSystem {
         });
         im.instanceMatrix.needsUpdate = true;
         if (im.instanceColor) im.instanceColor.needsUpdate = true;
+        // These counts already include `quality.scatterDensity`, so the tier
+        // factor must not be applied to them again. Set on the scrub meshes only:
+        // the pine cards, mid cards and sprigs are *not* generation-tiered, and
+        // marking a mesh whose count was never reduced would silently exempt it
+        // from the tier altogether — a marker that over-claims is worse than none.
+        im.userData.tierScatterApplied = true;
         im.name = `veg-scrub-${kind}-${far ? "far" : "near"}-${v}`;
         im.castShadow = castFoliage;
         im.receiveShadow = true;
@@ -1146,7 +1262,17 @@ export class VegetationSystem implements GameSystem {
     // whether a dark mass on the parapet is a shrub or a vent; a site list and a
     // height threshold settle it in one number, and name the culprits.
     const ROOF_Y = 1.6;
+    /*
+     * Restricted to the lot, because "ground above 1.6 m" stopped meaning "on
+     * the parapet" the moment the far scatter reached along the highway. The
+     * terrain genuinely rises past 190 m, and the unrestricted test went from 17
+     * to 36 hits the round the road corridor was added, naming clumps at
+     * (226, 12) and (-194, 13) as roof sites. They are on a hillside. A check
+     * whose false-positive rate depends on how far away the population lives is
+     * not a check; the roof is a place, so the test is about a place.
+     */
     const onRoof = sites
+      .filter((s) => Math.abs(s.x) < 70 && s.z > -20 && s.z < 90)
       .map((s) => ({ s, y: ground(s.x, s.z) }))
       .filter((r) => r.y > ROOF_Y);
     this.report.sitesOnRoof = onRoof.length;
@@ -1227,6 +1353,26 @@ export class VegetationSystem implements GameSystem {
     // branch is what a branch is for. Only boles, fence posts and poles.
     game.provide("vegetation.blockers", this.blockers);
     game.provide("vegetation.sites", this.plantSites);
+    /*
+     * The scrub clumps, published as their own population.
+     *
+     * `vegetation.sites` is the 228 mid-storey plants — saplings, sage, thistle.
+     * It is *not* the 2429 scrub clumps, and the difference matters more than it
+     * sounds: the clumps are what the scene reads as from anywhere on the
+     * forecourt, and until now no CPU tool could see them. Every density figure
+     * this system has produced, including my own ring table locating a cliff at
+     * 50-60 m, was measured on the mid-storey and then discussed as though it
+     * described the scrub. Same shape as every sub-population trap in NOTES.md:
+     * the number was real, the population was the wrong one, and nothing in the
+     * output said so.
+     *
+     * Kept separate rather than concatenated onto `vegetation.sites`, because
+     * that service is consumed as an exclusion/blocker input by other systems
+     * and quietly multiplying its length by eleven would be a change to their
+     * behaviour dressed up as a change to mine.
+     */
+    game.provide("vegetation.clumps", this.clumpSites);
+    this.report.clumpSitesPublished = this.clumpSites.length;
     this.report.blockers = this.blockers.length;
     this.report.plantSites = this.plantSites.length;
     this.report.blockerRangeM = BLOCKER_RANGE_M;
@@ -1465,6 +1611,87 @@ export class VegetationSystem implements GameSystem {
       this.materials.push(mat);
     }
 
+    /*
+     * The road fringe: the continuous layer, extended along the highway.
+     *
+     * The sheet above is a disc of radius 62 m about the lot, and the sprigs a
+     * disc of 42 m. Past 62 m there was no continuous element of any kind, only
+     * discrete clumps — and that, not the clump count, is why the far scrub
+     * reads as isolated sparks on clean dirt. A broken-but-continuous fringe
+     * cannot emerge from a scatter of discrete objects if there is nothing
+     * between them; the mat's own docstring makes this argument for the near
+     * field and the argument does not stop at 62 m.
+     *
+     * Measured, from three standing positions on the forecourt: past 60 m the
+     * clumps fill 14-21 of 40 bearing bins across the highway half of the view,
+     * with 28-30 degree runs holding under 4 px of silhouette. Inside 60 m it is
+     * 31-35 of 40. The hole is real and it is not a saturation problem.
+     *
+     * Along the road, not radially. A disc extended to 190 m would be 28 times
+     * the area for a fringe that is only ever seen in one direction, and it
+     * would put cover in the deep field behind the lot where nothing calls for
+     * it. Real roadside scrub is a ribbon: densest in the drainage strip at the
+     * pavement edge, thinning outward over ten or fifteen metres into whatever
+     * the country is. So the region is that ribbon, and the builder is told the
+     * shape rather than being given a bigger circle.
+     *
+     * Costs 2.1k cells at a 1.9 m pitch against the near sheet's 11.4k at 0.85 m,
+     * because a 100 m fringe does not need a 0.85 m lattice — one cell is under
+     * two pixels out there. Second draw call rather than one bigger mesh, for
+     * the same reason: a coarse far sheet and a fine near sheet cannot share a
+     * lattice, and the near one is the one already verified in pixels.
+     */
+    /*
+     * For a capability tier: 4358 triangles in one extra draw call, and the
+     * whole layer comes out with `?vforce=nofringe` or by not calling this. It
+     * carries far ground *tone*, not silhouette, so dropping it costs a band of
+     * ground reading as bare graded dirt rather than costing any plant. Measured
+     * contribution: 10.4k pixels at a mean 15 luma from the store door, 10.5k
+     * from the forecourt centre.
+     */
+    const FRINGE_REACH = 190;
+    const FRINGE_OUT = 15;
+    if (!this.fringeEnabled) {
+      this.report.fringeCells = 0;
+      this.report.fringeCellsKept = 0;
+      this.report.fringeTriangles = 0;
+      this.report.fringeOff = true;
+    }
+    const fringe = this.fringeEnabled ? buildMatSheet({
+      soil,
+      blocked,
+      ground,
+      centre: [0, 0],
+      radius: FRINGE_REACH,
+      extent: { halfX: FRINGE_REACH, halfZ: ROAD.halfPaved + FRINGE_OUT + 4 },
+      pitch: 1.9,
+      seed: 4409,
+      region: makeRoadFringeRegion({
+        halfPaved: ROAD.halfPaved,
+        reach: FRINGE_REACH,
+        out: FRINGE_OUT,
+        handoverCentre: CENTRE,
+        handoverRadius: SHEET_R,
+      }),
+    }) : null;
+    if (fringe) {
+      this.report.fringeCells = fringe.cells;
+      this.report.fringeCellsKept = fringe.kept;
+      this.report.fringeTriangles = fringe.triangles;
+      this.report.fringeMeanCover = Number.isFinite(fringe.meanCover) ? Number(fringe.meanCover.toFixed(4)) : null;
+    }
+    if (fringe?.geometry) {
+      const mat = magenta ? magentaMat() : matSheetMaterial();
+      const mesh = new THREE.Mesh(fringe.geometry, mat);
+      mesh.name = "veg-road-fringe";
+      mesh.castShadow = false;
+      mesh.receiveShadow = true;
+      mesh.renderOrder = 1;
+      this.group.add(mesh);
+      this.geometries.push(fringe.geometry);
+      this.materials.push(mat);
+    }
+
     if (!this.matSprigsEnabled) return;
     const sprigs = scatterSprigs({
       soil,
@@ -1484,7 +1711,7 @@ export class VegetationSystem implements GameSystem {
     this.report.sprigTriangles = tris * sprigs.length;
     const mat = magenta
       ? magentaMat()
-      : applyFoliageTransmission(
+      : this.maybeTransmit(
         new THREE.MeshStandardMaterial({
           color: 0xffffff,
           roughness: 0.94,
@@ -2154,10 +2381,36 @@ export function scatterScrub(
   ground: Ground,
   blocked: (x: number, z: number) => boolean,
   anchors: [number, number][],
-  densityScale: number
+  densityScale: number,
+  /*
+   * The scatter's seed, defaulted to the shipped one.
+   *
+   * Present because a single realization of this scatter cannot answer the
+   * question it kept being asked. Judging a shape change — moving the far
+   * clusters along the road instead of round a circle — by counting filled
+   * bearing bins in one realization compares two different random draws, and
+   * with 58 clusters spread over 170 degrees and 300 m of depth the draw-to-draw
+   * spread is as large as the effect. Three rounds of measurement here read as
+   * "helped, hurt, hurt" and were the same change each time; the rng stream
+   * simply reordered when the group structure changed.
+   *
+   * So `tools/vegfringe.mjs` sweeps seeds to get the mean and spread, and quotes
+   * the shipped seed separately, because what ships is one draw and the frame is
+   * judged on that one.
+   */
+  seed = 2718,
+  /**
+   * Layer switches for capture controls. Defaults are what ships.
+   *
+   * `corridor: false` drops the highway corridor group only. It is last in the
+   * loop and the groups are selected by index, so dropping it cannot perturb a
+   * single other plant — which is what makes the A/B a measurement of those 34
+   * clusters rather than of a reseeded site.
+   */
+  opts: { corridor?: boolean } = {}
 ): ScrubSite[] {
   {
-    const rng = seededRng(2718);
+    const rng = seededRng(seed);
     const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
     type Site = ScrubSite;
     const sites: Site[] = [];
@@ -2280,7 +2533,33 @@ export function scatterScrub(
         x += 0.22 + rng() * rng() * 0.85;
         // Density varies between a third and full, never to zero.
         const run = 0.34 + 0.66 * (Math.sin(x * 0.11 + side) * 0.5 + Math.sin(x * 0.031 - 1.2) * 0.5 + 0.5);
-        const near = Math.abs(x) < 90 ? 1 : 0.35;
+        /*
+         * Was `Math.abs(x) < 90 ? 1 : 0.35` — an instant 3x density drop at a
+         * fixed 90 m, with no ramp.
+         *
+         * Looking along the highway from anywhere on the forecourt that step is a
+         * line across the picture: full shoulder growth, then a third of it, at a
+         * distance the eye can see clearly. It is the abrupt stop a critic
+         * reacted to and it needed no measurement to be wrong — a step is never
+         * better than a ramp for a quantity that varies continuously in reality,
+         * and there is no physical reason for anything on a road shoulder to
+         * change threefold over one metre at 90 m from a filling station.
+         *
+         * Ramped over 55 m and floored at the same 0.35, so the far end costs
+         * exactly what it used to and only the transition changes. The ramp edge
+         * is also wandered by x, for the reason written next to every other mask
+         * in this file: a smooth ramp still puts an iso-density contour in the
+         * world, and a contour that is a perfect circle or a straight line draws
+         * itself.
+         */
+        const NEAR_FULL = 62;
+        const NEAR_FADE = 55;
+        const wander = 1 + 0.16 * Math.sin(x * 0.047 + 0.9) + 0.09 * Math.sin(x * 0.131 - 2.1);
+        const t = clamp01((Math.abs(x) - NEAR_FULL * wander) / NEAR_FADE);
+        // Smoothstep rather than linear: a linear ramp has a visible kink at both
+        // ends, and the kink at the near end sits closer to the camera than the
+        // step this replaces.
+        const near = 1 - 0.65 * (t * t * (3 - 2 * t));
         if (rng() > 0.82 * run * near * densityScale) continue;
         // Distance out from the pavement line. Biased toward the edge, but with
         // a tail into the ribbon so it has depth rather than being a line.
@@ -2477,13 +2756,93 @@ export function scatterScrub(
     // and it is right for the same reason the scale was wrong: these were doing
     // the job a ground mat should do, at a size and a count that made one asset
     // recognisable a dozen times in a frame.
+    /*
+     * Two groups: the original annulus, and a corridor along the highway added
+     * beside it rather than carved out of it.
+     *
+     * Splitting the existing 58 was tried first and measured, and it was a bad
+     * trade that only a two-window instrument could see. Moving two thirds of
+     * them into the corridor raised the along-road cones a long way — mean
+     * silhouette at 130-200 m went 31.9 px per 2 degree bin to 99.4, worst bare
+     * run 28 degrees to 10 — and emptied the view *across* the road, which fell
+     * from 7 filled bins of 40 to 1 in the 60-90 m band. A single window
+     * spanning both directions showed the sum and hid the trade; separating them
+     * showed a redistribution being read as an improvement.
+     *
+     * So the annulus keeps its 58 and the corridor is 34 more. That is about 260
+     * additional far plants into the existing far meshes: no new draw call, and
+     * far clumps are built at 0.45 detail. **For Perf: +34 clusters, roughly
+     * +260 instances, if the frame is tight this is the cheapest thing in
+     * vegetation to give back.**
+     *
+     * The 73-78 m gap gets its own small group for the same reason. Moving the
+     * annulus's inner radius from 78 m to 58 m closed the gap and measurably
+     * thinned the deep field it came out of — across the road at 130-200 m fell
+     * from 6 filled bins of 40 to 1 — because the annulus has only 58 members
+     * spread over 170 degrees and 300 m of depth, so anything taken from it is
+     * taken from somewhere visible. Additive again: the deep annulus is left
+     * bit-identical to what it was, and a 16-cluster ring covers the band.
+     *
+     * The gap was real. At 78 m from a centre 26 m up the lot the annulus
+     * reached z = -52 across the road while the open-dirt pass stops at z = -34,
+     * leaving an 18 m band across the highway, 44 to 62 m from where a person
+     * stands, that no layer occupied at all. Closing it took the across-road
+     * 90-130 m band from 0 filled bins of 40 to 8.
+     */
+    /*
+     * ## For a capability tier: these three are the cheapest instances to drop
+     *
+     * All three scale with `densityScale`, which is `?vdens=` and defaults to
+     * 0.74, so a low tier can take the whole far layer down with one number
+     * without touching this file. If a tier wants finer control, the order to
+     * give them back in is measured, not guessed — captured at 1600x900 from the
+     * forecourt with each layer switched off in turn:
+     *
+     *   roadClusters (34, ~260 instances)  1314 px in the -x view, 456 px in +x
+     *   gapClusters  (16, ~120 instances)  not separately captured
+     *   farClusters  (58, ~440 instances)  the original layer, seen in every pose
+     *
+     * `roadClusters` costs about a tenth of one percent of the frame and is the
+     * first thing to drop. It buys the along-road fringe, so dropping it returns
+     * the 60-200 m band to a 20-28 degree bare run, which is a defect a critic
+     * has already reported once. It is not free, it is just cheapest.
+     *
+     * `?vforce=nocorridor` drops `roadClusters` at runtime and echoes
+     * `corridorOff` in the report, so a tier experiment does not need a rebuild.
+     */
     const farClusters = Math.round(58 * densityScale);
-    for (let c = 0; c < farClusters; c++) {
-      const a = rng() * Math.PI * 2;
-      // Squared so density thins outward, biased to the visible half.
-      const rad = 78 + rng() * rng() * 300;
-      const cx = Math.cos(a) * rad;
-      const cz = 26 + Math.sin(a) * rad;
+    const gapClusters = Math.round(16 * densityScale);
+    const roadClusters = opts.corridor === false ? 0 : Math.round(34 * densityScale);
+    for (let c = 0; c < farClusters + gapClusters + roadClusters; c++) {
+      let cx: number;
+      let cz: number;
+      if (c >= farClusters + gapClusters) {
+        // Road coordinates: along the highway, then outboard with a long tail.
+        // The tail is squared so most sit in the first fifteen metres — a fringe
+        // is a ribbon with fraying, not a wide field — and it runs to 230 m
+        // because that is as far along the road as a clump still subtends a
+        // pixel or two.
+        cx = (rng() * 2 - 1) * 230;
+        const side = rng() < 0.5 ? -1 : 1;
+        cz = side * (ROAD.halfPaved + 2.5 + rng() * rng() * 72);
+        // Skipped inside the lot's own frontage, where the near layers already
+        // have it and `blocked` would reject most of it. Cheaper not to generate.
+        if (Math.abs(cx) < 62 && cz > 0) continue;
+      } else if (c >= farClusters) {
+        // The ring that closes the band between the open-dirt pass and the
+        // annulus. Uniform in radius over a 26 m band rather than squared,
+        // because a band this narrow has no outward thinning to represent.
+        const a = rng() * Math.PI * 2;
+        const rad = 52 + rng() * 26;
+        cx = Math.cos(a) * rad;
+        cz = 26 + Math.sin(a) * rad;
+      } else {
+        const a = rng() * Math.PI * 2;
+        // Squared so density thins outward.
+        const rad = 78 + rng() * rng() * 300;
+        cx = Math.cos(a) * rad;
+        cz = 26 + Math.sin(a) * rad;
+      }
       if (Math.abs(cx) > 330 || cz < -140 || cz > 430) continue;
       // A few big patches, many small ones.
       const big = rng() < 0.22;

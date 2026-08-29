@@ -11,6 +11,34 @@ it is being compared against.
 
 ---
 
+## TEARDOWN — do this when the work is finished, not before
+
+The user has asked for the disposable output to be deleted **once the work is
+done**. It is still load-bearing until then: `shots/` is the evidence every
+critic pass reads, and the per-round archives are what makes a before/after
+comparison traceable in a tree six agents commit to.
+
+At teardown, delete:
+
+- `shots/` — 1.3 GB. Capture rounds, the `_*` scratch directories, the PNG
+  sequences under `shots/film/frames/`, and the run logs. **Keep
+  `shots/film/dawn-station.mp4` — the user has asked for it explicitly.** It is
+  the only rendered artefact and is not in git, deliberately, because it is
+  regenerated output, so deleting it destroys the only copy.
+- `.shot-build/` — 27 MB, per-system private bundles. Pure build output.
+- `tmp/` — 30 MB scratch. Contains `tmp/film-standdown/`, which is the recovery
+  snapshot of `tools/filmwalk.mjs`; that one is safe to drop once the film
+  harness has been confirmed good.
+- `audio-plots/` — 344 KB of offline audio plots.
+
+Then `git gc --prune=now` to reclaim the ~379 MB of unreachable loose objects
+left by an early `git add -A` that touched `shots/`. None of it was pushed.
+
+All four paths are already in `.gitignore`, so none of this affects the repo at
+`StarKnightt/gas-station-highway`.
+
+---
+
 ## 0. Read this before running anything
 
 - **Do not run two harnesses at once.** They build into separate dirs
@@ -1285,3 +1313,497 @@ whose result was predetermined by construction.
 What caught it: the harness prints its active force tokens in its own stats line,
 so `"tforce":[]` appeared in a round that should have had one. **Print the state
 the run is in, not the state it was asked for.**
+
+## CORRECTED, for Lighting and Canopy, from Terrain: the forecourt is dark but it is *not* shadowed
+
+**Read this before acting on the previous version of this section.** The
+measurement below is unchanged and still stands. The cause I attributed to it was
+wrong, and the prescription that followed from it was wrong in a way that would
+have made the region worse. If either of you has already started on soffit bounce
+or `environmentIntensity` for this reason, stop and read.
+
+**What I got wrong.** I computed the deck shadow's *reach* — 4.72 m at a low sun
+throws a shadow tens of metres — and then assumed it covered the deck's own
+footprint plus that reach. A shadow is a **translation** of the footprint, not a
+dilation of it:
+
+    shadow = footprint + h * (toward-sun XZ) / sin(elevation)
+
+At the shipped 6.2° that is the footprint moved **43.5 m**, landing at x 10.7–23.9,
+z 53.0–66.6. `FORECOURT` is x ±11.6, z 12.4–27.2, so **0.0% of the forecourt is
+inside the deck's shadow.** The sun arrives *under* the deck edge. A roof at dawn
+shades somewhere else — the lower the sun, the further its shadow leaves it. Full
+working in `tools/poolsite.mjs` part 1; `NOTES.md` case 71.
+
+**What is actually happening.** A horizontal plane at a 6.2° sun receives
+`sin(6.2°)` = **10.8% of the beam**, uniformly, everywhere on the site, whether or
+not anything is over it. That is the whole of the darkness. It has the same
+symptom as deep shade and the opposite prescription.
+
+**So the prescription inverts.** Do not push ambient into this region:
+
+- The forecourt is *directly lit*, so added ambient does not restore a missing
+  direct term — it adds a second constant to a region that is already dominated by
+  constants, which is the flat-and-milky outcome you were right to fear.
+- Worse, it would erase the only large-scale tonal structure the forecourt has.
+  The pumps stand ~1.9 m on the islands and at 6.2° each throws a 17.5 m streak
+  along bearing (0.397, 0.918); the islands themselves throw 1.49 m off a 162 mm
+  reveal. **Estimated ~33% of the forecourt is in cast shadow from pumps, islands
+  and columns**, in long streaks crossing it diagonally. That is estimated from
+  geometry, not measured — Lighting's shadow-map viewer can confirm or refute it in
+  one look, and it is worth looking, because those streaks are an asset and are
+  the thing an ambient lift would flatten.
+
+**What does work there, and Terrain has now built it:** specular response, because
+specular is bounded by the light falling on what a surface *reflects* rather than
+on the surface. Two pools on the forecourt, detail in the section below. The
+general rule stands unchanged and is the durable part — measure a region's tonal
+spread before authoring albedo detail onto it; under ~10% of range nothing painted
+will read.
+
+**And a shared constant that misled all of us:** `site.SUN.elevation` said 11°
+while `LightingSystem` privately shipped 6.2. Nothing in `src` read the shared
+field, so the disagreement was invisible until CPU probes started computing
+shadows from it. It now holds 6.2. **Lighting: please import it rather than keep
+`SUN_ELEVATION_DEG`. Canopy: `probe-canopy.mjs` and `probe-shadowsource.mjs` both
+read it and have been computing every shadow length 1.8× short.** Vegetation
+already found this and hard-coded 6.2 into `vegshadowfit.mjs`. `NOTES.md` case 72.
+
+One consequence worth propagating: the solar tangent that a slope must beat to
+catch relief lighting is `tan(6.2°)` = **0.109**, not the 0.194 I circulated. The
+bar is lower than advertised, which helps everyone — though Terrain's far-ground
+terms at 0.006 are still short by a factor of 18, so that conclusion is unchanged.
+
+### The measurement, which is unchanged
+
+Measured in `walk_pump`, an eye-height view along the fuelling lane:
+
+| region | p10 | p50 | p90 | spread | % of 0–255 |
+|---|---|---|---|---|---|
+| forecourt under the canopy | 31 | 41 | 50 | 18.6 | 7.3% |
+| sunlit ground, same frame | 34 | 125 | 167 | 132.7 | 52.0% |
+
+The second row is ground that is *not* horizontal, or is nearer the sun's
+azimuth — which is now the interesting question rather than an aside, since both
+rows are directly lit.
+
+The consequence for anyone authoring surface detail there: a 30% albedo mark — as
+strong as fresh rubber on concrete — moves a p50-41 surface by 12 levels, 4.8% of
+range, in a frame whose highlights are at 255. Terrain has now put tyre scrub,
+swing-in ribbons, oil and a kerb grime band on that surface, verified reaching
+pixels against a forced-off control (71% of near-field pixels moving, mean 3.9
+levels), and **none of it is visible.** It is not a texture problem and Terrain
+cannot fix it by painting harder; doing so would mean authoring absurd albedo
+values that look wrong the moment the light is corrected.
+
+**Superseded.** The two fixes previously listed here — soffit bounce, and raising
+the concrete's `envMapIntensity` from 0.72 — were both aimed at restoring a direct
+term that is not missing. `envMapIntensity` stays at 0.72; Terrain is not moving
+it, and now has a reason of its own rather than only deference.
+
+Soffit bounce may still be worth having on its own merits: a canopy with its lamps
+on at dawn does put light under itself, and it would give the region *directional*
+fill rather than isotropic fill, which is a different and better thing than an
+ambient lift. But it is no longer a fix for this, and it should not be sized as
+one.
+
+Worth knowing that this is the bottom third of most of the film's exterior: all
+three walking poses have their near forecourt in it.
+
+**A general note that came out of it**, in `NOTES.md`: the visible contrast of an
+albedo feature is the product of its albedo ratio and the illumination on it, and
+in shadow the second term dominates. **Measure the tonal spread of a region before
+authoring detail onto it** — under about 10% of range, no albedo work will read
+and the lever belongs to whoever owns the light.
+
+## ALL SYSTEMS: a shader warning is not a shader failure
+
+`shoot1` aborted a healthy round on ANGLE's `warning X4122: sum of 0.996094 and
+-2.98545e-017 cannot be represented accurately in double precision`, which is
+ordinary constant folding. The detector matched `program info log` — the envelope
+every shader diagnostic arrives in, benign ones included.
+
+Compile and link errors stay fatal. What changed is the classification: `warning
+X\d+` is excluded unless the same line also says `error`, self-tested on four
+cases including a line carrying both. If your harness greps the info log, it has
+this bug, and **a gate that fails a healthy round teaches its operator to stop
+reading it.** Benign diagnostics are now printed as notes rather than dropped.
+
+## From Terrain: standing water on the forecourt, and two things in shared files
+
+Authored and CPU-verified this round; **not yet rendered** — the GPU hold was in
+force, so everything below is geometry, arithmetic and a shader lint, and none of
+it is pixels. Flagged as such deliberately: the last two rounds both produced a
+feature that measured as working and rendered as nothing.
+
+### What was built
+
+Two pools on the concrete forecourt, which had none. `FORECOURT_POOLS` in
+`src/site.ts` carries the geometry and the long argument; the short version:
+
+| | pool 1 | pool 2 |
+|---|---|---|
+| centre | (1.95, 24.6) | (-2.3, 24.32) |
+| wetted area | 1.87 m² over 2.22 × 1.14 m | 0.93 m² over 1.65 × 0.69 m |
+| max depth | 28 mm | 21 mm |
+| past the mirror ramp | 76% of area | 71% of area |
+| drying stain reaches | 2.34 × 1.53 m | 1.83 × 0.96 m |
+| in `walk_pump` | 256 × 36 px, Fresnel 48% | 285 × 59 px, Fresnel 33% |
+| in `walk_store` | 532 × 150 px, Fresnel 21% | 256 × 48 px, Fresnel 37% |
+
+Both sit at z 23.5–25.7, which is **under the canopy deck** — deliberately, and
+this is the bit that concerns Canopy. What fills them is the column downpipe
+discharge shoe, not rain. Water arriving down a pipe does not care that there is a
+roof over it, so the pools bypass the rain-shadow arm while the damp film around
+them does not.
+
+**Canopy:** your four columns each end in a turned-out spout 140 mm above the
+plinth, and I have taken that literally as the water source. If you ever move the
+columns or the shoe face, these two puddles are downstream of that decision — they
+are placed at the x = ±3.5 island-2 columns, on the *upstream* (north, z 23.8)
+side of the island kerb, which is the side a dam ponds on given flow runs toward
+-z down the crown. A gutter discharge landing where water already stands is the
+detail you and I discussed; this is my half of it.
+
+### `mirrorDepth`, a new `worldDetail` parameter — shared file, read this
+
+`SoilDetail` gains `mirrorDepth`, the water depth at which standing water stops
+showing its dish and behaves as a surface. **Default 0.020, which is the literal
+the three depth ramps used to contain, so every existing surface is unchanged to
+the bit** — verified, not asserted: `tools/shaderlint.mjs` checks that asphalt
+resolves `uWaterThick` to 0.020 and `uSoilStain` to 0.
+
+It is a parameter because the quantity is a property of the **substrate**, not of
+water: it stands in for the substrate's own relief becoming emergent through thin
+water. Asphalt with 7 mm exposed aggregate needs 10–20 mm; a float-finished slab
+needs about 5, which is what the concrete now uses. Reusing the asphalt figure on
+a 24 mm slab puddle put 13% and 0% of the two pools past the ramp and would have
+shipped them as damp patches. `NOTES.md` case 73.
+
+If you add water to a surface, set this to something defensible for your
+substrate rather than taking the default because it is there.
+
+### `tools/shaderlint.mjs` — GPU-free validation of `worldDetail`, for everyone
+
+`onBeforeCompile` is ordinary JavaScript. Nothing about it needs a GL context, so
+it can be invoked directly against three's stock `physical` source and the result
+inspected. This catches the two failures `worldDetail` has actually shipped — an
+undeclared uniform, and a backtick or unexpanded `${}` surviving into GLSL — both
+of which are otherwise invisible until a link, and one of which has cost this
+project hours.
+
+It does not catch driver-specific compile errors and does not claim to. It exists
+so that authoring under a GPU hold is not authoring blind, and it is generic: any
+material configuration can be added as a case.
+
+**It self-tests.** Four planted defects must be caught and a clean sample must be
+silent, every run, before it reports on anything. That is there because three
+instruments tonight returned a confident result that was predetermined by
+construction, and a linter that has never been shown to fail is the fourth.
+
+### Control arms, since every one of these is meant to be felt rather than seen
+
+- `?force=nofpool` — removes the basins from the height field, and therefore the
+  whole feature including the derived water levels.
+- `?tforce=nostain` — keeps the water, removes the saturated ground around it.
+- `?tforce=nowet` — removes every water arm on every surface, as before.
+
+Three tokens rather than one because they answer different questions, and a single
+token could not say which half was doing the work.
+
+## TERRAIN: solar tangent correction — supersedes the 0.194 I distributed
+
+If you took the figure **0.194** from me as "the slope a surface must exceed to
+catch relief lighting at this sun", **replace it with 0.109.** It was wrong, and
+the reason is worth two minutes of anyone's attention.
+
+- `LightingSystem` lights the scene from a private `SUN_ELEVATION_DEG = 6.2`.
+  That is the authority, because it is the number the photograph is evidence
+  about. `tan(6.2 deg) = 0.109`.
+- `src/site.ts` exported `SUN.elevation` at **11 deg**, unread by anything in
+  `src/`, so no render could ever have contradicted it. Corrected in place, with
+  the reasoning in the file. Lighting owns the reconciliation.
+- My own tool held `SUN?.elevationDeg ?? 11.2` — a field name that does not
+  exist — so it never read the shared constant at all and used its default on
+  every run in its life. That default is where 0.194 came from.
+
+**Shadow reach at this sun is 43.5 m per metre of occluder height, not 24.3 m.**
+Canopy's 24.3 m is the 11 deg figure. The conclusion both of us drew is
+unaffected — the canopy deck's shadow misses the forecourt either way — but the
+reach number itself should be mine.
+
+**Two Canopy probes are still reading the stale value** through `SUN.elevation`;
+they now self-heal because the constant is fixed, but `tools/probe-canopy.mjs`
+and `tools/probe-shadowsource.mjs` should be re-run rather than trusted from
+cache. `tools/vegshadowfit.mjs` holds a correct private `6.2` and is fine,
+though it is a private copy of a shared quantity and will drift.
+
+**Grep your own tools for `?.` followed by `??` on a shared constant.** The idiom
+reads as caution and behaves as suppression: it turns a misspelt field, a renamed
+field and a unit change into the same silent plausible number. If the constant is
+the axis your whole report is measured along, a default is the failure and a
+throw is the fix.
+
+## TERRAIN publishes: `tools/armregion.mjs` — judging a subtle feature against its control
+
+Every system now has forced-off arms, and this is the instrument for reading
+them. `node tools/armregion.mjs feature.png control.png [threshold]` on the same
+pose from the same bundle. It answers three things `armdiff` does not:
+
+- **Which way.** Brightened and darkened pixels reported separately. A feature
+  that both lifts and drops tone has a mean near zero and measures as nothing
+  while delivering its entire effect — my pools brighten 1.88x and their drying
+  stain darkens 0.76x, and pooled they read as +0.7 levels.
+- **Where.** Connected components as ready-made `pngcrop` commands. **A 67 px
+  feature judged inside an 800 px crop reads as flat no matter how good it is**;
+  I called my own working pools a "flat pale blob" from a wide crop before
+  cropping to them.
+- **Against what.** The same pixels in the control arm, never a ring of
+  neighbours in the feature arm. A 40 px ring around my pools gave 1.05x because
+  it caught sunlit ground and a pump cabinet; the same pixels forced-off gave
+  1.88x. **A ring is a neighbourhood, not a baseline.**
+
+If it prints NOTHING MOVED, suspect the token before the feature.
+
+## TERRAIN: the fourth tier hook has landed — `quality.detailPatches`
+
+**Measured, not asserted.** `tools/tierprogs.mjs` (new, port 5132) reads
+`renderer.info.programs` from inside GL after 30 drawn frames, groups by cache
+key, and reports per arm:
+
+| arm | total programs | of which `wd:` |
+|---|---|---|
+| `high` | **193** | 16 |
+| `high+lodetail` (isolated arm) | **187** | 10 |
+| `low` | **181** | 10 |
+
+- **No-op at `high`: 193 before the change and 193 after**, on the exact quantity
+  being changed. The non-reduced code path and cache key are character-identical.
+- **−6 programs attributable to this hook alone**, via `?tforce=lodetail`, which
+  moves only the eight `applyWorldDetail` variants. `?tier=low` moves the shadow
+  filter, shadow map, world capture and detail patches together and therefore
+  cannot attribute anything; the other −6 at `low` belongs to Lighting.
+- Note the 16 rather than 8: each of the eight materials gets **two** programs,
+  because it is used on meshes with differing vertex attributes. That doubling is
+  in three's own parameters, not in anything an owner controls.
+- Injected fragment source per program: **+22,045 chars reduced against +39,070
+  at high, 44% smaller.** These are the largest programs in the scene, so the
+  link-time saving is very likely larger than 6/193 suggests — **but that is
+  unmeasured and should not be quoted as a time.**
+
+### What the low tier's ground looks like, as a decision
+
+Kept: **macro breakup, anti-tiling, and the site overlay.** Dropped: `soil` (and
+with it the damp film, the pools, the drying stain and the second dirt material),
+`wash`, `wheels`, `erode`, `void`.
+
+That split is not the cheap subset, it is the subset that protects against the
+one failure a low tier is not allowed to have. Macro breakup and anti-tiling are
+what stop the asphalt reading as a repeating texture; **a tier that drops them
+silently looks broken rather than plain.** The overlay is one texture lookup and
+carries the site's entire history of use.
+
+Captured and confirmed rather than argued: round
+`2026-08-29T065543Z-51f4a417452f`, `walk_store` and `walk_pump`. The reduced
+ground reads as plain dry pavement with no visible repeat. Tonal spread is
+retained — 92 against 105 at `walk_store`, 114 against 111 at `walk_pump` — so it
+is not collapsing toward uniform, which was the risk. It reads as **a dry morning
+on a used lot** rather than the morning after rain.
+
+### MEASURED AND NOT TAKEN — for whoever owns the program budget
+
+Using the reduced cache key at **every** tier collapses the high-tier count too,
+at **zero picture cost**: identical source is identical pixels by construction,
+and `tools/shaderlint.mjs` now asserts byte-identity between unlike materials
+plus the one-sided invariant (same key + different source = FAIL). Not taken
+because "no-op at high" was a hard requirement and this moves a number there.
+Worth roughly the same −6, available on request.
+
+Two findings for anyone else using `customProgramCacheKey`:
+
+1. **A key may be finer than the source requires; never coarser.** Coarser is
+   silent and serious — three hands one material another's compiled program with
+   no link error. Finer is silent and merely expensive. Test the one-sided
+   invariant, not key equality.
+2. **A flag that only changes a uniform VALUE has no business in a cache key.**
+   `useAnti` had been in ours since it was written and split byte-identical
+   programs, because the anti-tile arm is always emitted and switched by
+   `uAntiTile`. The question is not "does this option change the material", it is
+   "does this option change a character of the source". Grep your own keys.
+
+### One warning about `tools/tierprogs.mjs`
+
+Its time-to-30-frames column is **not quotable as a cold-load saving** and is
+labelled as such in the file. All arms in a run share one browser process and so
+one driver program cache: arm 1 pays the link cost and later arms are warm by
+construction. It reported 0.7 s / 0.7 s / 0.3 s, which reads as a win for the
+reduced arm and is cache order. A cold measurement needs a fresh process per arm.
+
+## TERRAIN: the spawn gravel verge, and a check every system with an InstancedMesh should run
+
+Film's spawn-frame complaint diagnosed on CPU against the archive. Full detail in
+`HANDOVER-terrain.md`; two things here that are not Terrain's alone.
+
+### For anyone with an `InstancedMesh`: check where your variation lives
+
+The verge was 24000 stones that were all the same stone at the same tone, because
+the per-vertex colour array was written onto the geometry — and `InstancedMesh`
+shares one geometry across every instance. **A per-vertex attribute on shared
+geometry is a property of the object, not of the field.** Per-instance variation
+needs `setColorAt`, which is a different API, and nothing warns you. The code had
+a comment claiming exactly the property it did not deliver.
+
+Audited: nine `InstancedMesh` sites in `src/`. **Vegetation, Canopy and
+`vegLitter` all already use `setColorAt`** and are clean. Terrain's stones were
+the only coloured instanced field without it, now fixed. If you add one, the
+question is "what varies per instance" — and if the answer is only the matrix,
+your field is one object repeated.
+
+### "Repetitive" is not "periodic", and the two need different instruments
+
+`tools/probe-period.mjs` reports the verge non-periodic at max r 0.235 with the
+peak lag disagreeing in every band, while its selftest finds a planted repeat at
+r 1.000 in all nine. Both the probe and the critic were right. When an observer
+reports repetition, ask which axis it is on before picking a tool:
+
+| percept | mechanism | instrument |
+| --- | --- | --- |
+| repeats at a spacing | UV period, tiled map | `probe-period.mjs` autocorrelation sweep |
+| every element looks like every other | shared geometry or shared tone across instances | read the scatter loop; count what varies per instance |
+| everything is the same size | narrow-band field, narrow size distribution | percentile ratio of the feature scale |
+
+Only the first is periodicity. Three "it repeats" reports this project, three
+different mechanisms: aliasing, a real world period a mis-scoped crop nulled, and
+now identity.
+
+### Two numbers other systems can reuse
+
+**A world length and a screen length are not one factor apart when they lie on
+different axes.** At the 6.2 deg sun a stone's shadow is 9.2x its protrusion, so
+"a scatter reads as its shadows" looks obvious — the measured ratio is **1.6x**,
+because the protrusion is vertical and unforeshortened while the shadow lies
+along the ground and is compressed by sin(depression), 0.45 at the spawn pose.
+A low sun puts the object and its shadow on different axes by construction, so
+anyone reasoning about shadow-driven relief should foreshorten before concluding.
+
+**A dense scatter the same value as its background is a low-pass filter.** The
+verge measured as the flattest region in the lower frame — p10-p90 spread 14
+against 34 on the forecourt and 42 on the *gravel-free* dirt — because the stones
+were within 2.4% of the soil's luma. Adding 24000 objects removed the region's
+tonal variation. Busy and flat at once is reachable, and it is worse than either.
+Relevant to anyone scattering debris, litter or accumulation onto a surface: if
+your scatter matches its background in value, it costs triangles and buys
+frequency without contrast.
+
+### Spawn-pose numbers, published
+
+Anyone judging near-field work should use the pose that produces the complaint.
+Archived spawn is a **level** camera (pitch -0.559 deg), eye 1.650 m above local
+ground, vfov 52. Consequences:
+
+| screen row | depression | ground distance | mm per px (radial) |
+| --- | --- | --- | --- |
+| 900 (bottom) | 26.6 deg | 3.30 m | 8.3 |
+| 850 | 23.7 deg | 3.76 m | 10.3 |
+| 800 | 20.8 deg | 4.35 m | 13.3 |
+| 750 | 17.9 deg | 5.11 m | 17.7 |
+| 700 | 15.0 deg | 6.16 m | 24.9 |
+| 620 | 10.4 deg | 9.01 m | 51.5 |
+
+**A 1024 map over a 17 m tile is 16.6 mm per texel, which is magnified 2.0x at
+the bottom frame row.** Any ground-adjacent map at that density is a blur in the
+immediate foreground, and no amount of spectrum work on it will read there.
+
+## LANDED: `worldDetail` program key collapsed at every tier — and the rule it establishes
+
+Perf ruled to take the collapse; both of its conditions landed with it. Detail in
+`HANDOVER-terrain.md`. Three things here are not Terrain's alone.
+
+### The repo-wide question to ask of any `customProgramCacheKey`
+
+**Does the option change a character of the emitted source — not, does it change
+the material?** Terrain's key contained the material's own name plus a `useAnti`
+bit that gated no emission at all: `uAntiTile` was declared unconditionally and
+switched inside the GLSL by `if (uAntiTile > 0.0)`. It had been splitting
+byte-identical programs since it was written, and nothing could have noticed,
+because over-splitting has no symptom.
+
+Perf swept the other five sites: **four more key on configuration identity rather
+than on emitted source. All safe, possibly wasteful, and NOT to be touched
+today.** If you own one, the audit is a grep and the question above is the whole
+test.
+
+### The asymmetry, which decides how any key should be written
+
+| direction | consequence |
+|---|---|
+| key too FINE | the same shader compiles repeatedly. Costs seconds. |
+| key too COARSE | one material is silently handed another's compiled program. No link error, no warning, a plausible wrong frame, and nothing downstream able to attribute it. |
+
+So **a key may always be finer than the source requires; it may never be
+coarser** — and the operative rule: **collapsing a key is only ever safe behind a
+standing assertion, never behind a one-time measurement.** A measurement proves
+the tree you measured; an assertion proves the tree someone edits next week.
+
+### A gate must be proven able to fail, and both of these were
+
+This project has now been bitten three times by instruments whose result was
+predetermined — a `FORCE` token that no-oped Node-side so a control could not
+fail, `computeVertexNormals()` certifying whatever winding it was given, a
+`canReach` that snapped to the nearest reachable cell. So both new gates were
+tested by planting the defect they exist to catch:
+
+- Source made to depend on `opts.key` **on the default path only**: the new
+  default-mode block failed and located the divergence, while the reduced block
+  reported `ok`. **The previous reduced-only linter reported all green on that
+  tree** — which is precisely why asserting the arm that no longer needs guarding
+  and leaving the shipping arm bare would have been worse than useless.
+- `antiTile` made to change the emitted source: fatal in both tiers. This check
+  previously printed the safe state as `note` and **the dangerous state as `ok`**.
+  The docblock beside it had predicted the hazard word for word without gating it.
+
+**A docblock that names a hazard is not a guard against it**, and a check that
+fires on the safe case is a check someone switches off.
+
+### Cite `NOTES.md` by title, never by number
+
+85 headings across 58 numbers, **27 of them reused**. Every number is ambiguous
+and any citation by number is a coin flip. Not renumbered, because renumbering
+invalidates every existing citation in the repo simultaneously. All Terrain
+citations converted to titles.
+
+## Terrain, closing: the spawn foreground is paved, and that band is closed
+
+For anyone who inherits Film's spawn-frame note or reasons about the ground in
+front of the spawn point.
+
+**The "gravel verge in the immediate foreground" is the driveway apron.** It
+unprojects to world x -14.25..-12.35, z 5.55..7.5, and `drivewayY` interpolates
+from `ROAD.halfPaved` (5.16) to `PAD.minZ` (8.4) across exactly that span.
+`pavedDistance` returns 0.00 m at 45 of 45 samples across the band, so it is
+100% inside the gravel scatter's 0.12 m paved exclusion. Its rendered p50 of 29
+matches forecourt asphalt at 28, not dirt.
+
+**No scatter change can populate it and none should.** Loose gravel on a driveway
+is a defect; the exclusion is correct. Two rounds went into the gravel scatter on
+the strength of a one-sentence percept report, and the object named in the report
+was not in the region named in the report.
+
+**The remaining defect there is real and is priced**: asphalt magnified 2.0x with
+no relief, filling the bottom third of the opening frame. It is the bounded
+near-field detail layer in `PERF.md`, now flagged there as the fix for Film's
+complaint rather than as a polish item.
+
+### Two method results worth carrying
+
+**Make presence primary and appearance secondary.** A judge that asks "does it
+look better" before "did the thing land" will certify a non-fix. Both of my
+rounds failed on presence while printing plausible appearance numbers, and both
+times the ordering is what caught it.
+
+**Whole-frame diff first, fixed regions second.** Fixed boxes are the right
+answer to hand-picking a flattering region after the fact, but a box set chosen
+from a hypothesis inherits that hypothesis. Five boxes reported 0.00% changed and
+read as "the change did nothing"; a 50 px whole-frame diff found 5,377 changed
+pixels elsewhere and proved the change had executed. The sweep costs a second and
+it is the only step that can tell you your regions are in the wrong place.

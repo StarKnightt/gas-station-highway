@@ -58,7 +58,32 @@ const { ROAD, PAD, DRIVEWAYS, SUN, groundHeight } = site;
  * a slope census and renders flat.
  */
 const STEP = 0.63;
-const sunTan = Math.tan((SUN?.elevationDeg ?? 11.2) * (Math.PI / 180));
+
+/**
+ * The solar tangent, from the shared constant, with NO fallback.
+ *
+ * This line previously read `SUN?.elevationDeg ?? 11.2`. The field is
+ * `SUN.elevation` and it is in RADIANS, so `elevationDeg` was always
+ * `undefined` and the fallback fired on every run this tool has ever made.
+ * The tool therefore never read the shared constant it appeared to read, and
+ * the 0.194 solar tangent circulated to four other systems is tan(11 deg)
+ * from a default, not tan of anything the scene lights with. The correct
+ * figure is tan(6.2 deg) = 0.109, and every slope-versus-sun conclusion
+ * drawn from this tool was comparing against a sun 1.8x steeper than the
+ * one the renderer ships.
+ *
+ * An optional chain followed by `??` is not a defensive read, it is a
+ * silent one: it converts a misspelt field name into a plausible number.
+ * So this now throws. A tool that cannot find the sun must not guess it.
+ */
+if (!Number.isFinite(SUN?.elevation)) {
+  throw new Error(
+    `[dirtscan] site.SUN.elevation is ${SUN?.elevation} (expected radians). ` +
+      `Refusing to substitute a default: every slope conclusion below is a ` +
+      `comparison against this number.`
+  );
+}
+const sunTan = Math.tan(SUN.elevation);
 
 /** Steepest slope at a point, from a central difference on both axes. */
 function slopeAt(x, z) {

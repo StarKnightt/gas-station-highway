@@ -359,7 +359,7 @@ async function main() {
     for (const shot of SHOT_NAMES) {
       const page = await context.newPage();
       await page.goto(`http://127.0.0.1:${PORT}/?shot=${shot}`, { waitUntil: "load", timeout: 60_000 });
-      await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 180_000 });
+      await page.waitForFunction(() => window.__SCENE_READY === true, null, { timeout: 420_000, polling: 500 });
       if (!global) await assertHardwareGpu(page, { tag: "budget" });
       await assertSceneGpu(page, { tag: "budget", when: `at shot=${shot}` });
 

@@ -196,6 +196,60 @@ export interface InteriorParams {
    * doorway down with the lamps, which is the one term that has to survive.
    */
   lampGain: number;
+  /**
+   * Share of each ceiling troffer's output re-delivered as a shadow-casting spot
+   * (`?tcast=`). Zero by default: it adds one 512 shadow map and one shadow pass
+   * per fixture, which has to be paid for by a measured improvement.
+   */
+  troffCast: number;
+  /**
+   * How many fixtures get one (`?tcastn=`), nearest the camera side first.
+   *
+   * Capped at 1 by default because every caster is another shadow map *and*
+   * another shadowed light in every interior fragment shader, and WebGL2 gives a
+   * fragment stage 16 texture units to share. At this fixture count `?tcast=` with
+   * no cap took the page down. One caster is also the physically sensible first
+   * try: several fixtures at once wash each other's shadows out, which is why a
+   * real shop's shelving reads soft.
+   */
+  troffCastMax: number;
+  /**
+   * Share of the transmitted shopfront daylight delivered by the *unshadowed*
+   * rect (`?drect=`), and by the *shadow-casting* spot (`?dspot=`). Held as two
+   * independent multipliers rather than one crossfade so that a round can put
+   * all the energy through one path, match the frame means, and then compare the
+   * structure at equal exposure. Comparing structure at unequal brightness is
+   * how a darker frame gets mistaken for a better-shaded one.
+   */
+  rectShare: number;
+  spotShare: number;
+  /** Spot intensity at `spotShare` 1, calibrated by sweep rather than guessed. */
+  spotWatts: number;
+  /**
+   * Multiplier on the two unshadowed point lights that stand in for the sun
+   * patch bouncing off the floor (`?dbounce=`).
+   *
+   * Measured at 44.8 of the 92.0 luma that the interior lighting contributes to
+   * `interior_cold` - the largest single term in the room, larger than every
+   * lamp put together. That is the ground-disc pattern again: a constant
+   * standing in for a transport term nobody computed, sized by eye until the
+   * frame looked full.
+   *
+   * The arithmetic says it cannot be this large. The floor patch is lit at
+   * grazing incidence, so it receives sin(6.2 deg) = 10.8% of the beam, and at a
+   * floor albedo near 0.2 it returns about 2% of it. A fill worth 2% of the beam
+   * cannot legitimately be the brightest thing in the room, and the frame agrees:
+   * interior p50 181 against exterior 82 inverts the brief's central contrast.
+   */
+  bounceGain: number;
+  /**
+   * `?dnoshadow=1` keeps the spot and switches off only its casting. The control
+   * that matters: it separates "occlusion changed the room" from "a differently
+   * shaped light changed the room", which a spot-versus-rect comparison alone
+   * cannot, since the two differ in position, falloff and angular profile as well
+   * as in whether anything can block them.
+   */
+  spotCasts: boolean;
   /** False (`?lforce=clearglass`) leaves the glazing perfectly transmissive. */
   glazingShadow: boolean;
 }
@@ -209,6 +263,10 @@ export interface InteriorBuild {
   doorGlow: THREE.PointLight;
   /** Diffuse daylight transmitted through the tinted storefront. */
   daylight: THREE.RectAreaLight | null;
+  /** The same daylight on an occludable path, so shelves shade each other. */
+  daylightSpot: THREE.SpotLight | null;
+  /** Shadow-casting twins of the ceiling troffers; empty unless `?tcast=`. */
+  troffCasters: THREE.SpotLight[];
   glazing: { storefrontShadow: boolean; doorGlass: boolean };
   setDoorOpenAmount(amount: number): void;
 }
@@ -286,6 +344,7 @@ export function buildInteriorLighting(p: InteriorParams): InteriorBuild {
   group.name = "lighting-interior";
 
   const troffers: THREE.RectAreaLight[] = [];
+  const troffCasters: THREE.SpotLight[] = [];
   const coolerLights: THREE.RectAreaLight[] = [];
 
   /* ---------------- lay-in troffers ---------------- */
@@ -309,6 +368,42 @@ export function buildInteriorLighting(p: InteriorParams): InteriorBuild {
     const up = new THREE.PointLight(FLUORESCENT, 0.5 * p.lampGain, 2.6, 2);
     up.position.set(pos.x, pos.y + 0.18, pos.z);
     group.add(up);
+
+    // Optionally, the same troffer again as a source that can be blocked
+    // (`?tcast=`).
+    //
+    // This exists because of what Building's instrument actually measures. It
+    // reports the asymmetry of *vertical* local contrast - dark bands under
+    // horizontal edges - which is the signature of light arriving from above and
+    // being interrupted. Every overhead light in this room is a RectAreaLight,
+    // and three cannot shadow one at any intensity, so the statistic is pinned by
+    // construction rather than by grading.
+    //
+    // That prediction is why the obvious fix failed. Putting the shopfront
+    // daylight on an occludable path demonstrably occludes - 69.75% of channels
+    // move when its casting is switched on at matched intensity - and moved the
+    // asymmetry only from 1.02 to 1.03, because a side window darkens the faces
+    // pointing away from it rather than the undersides of shelf lips. To move an
+    // overhead statistic the overhead light has to be the one casting.
+    if (p.troffCast > 0 && troffCasters.length < p.troffCastMax) {
+      const cast = new THREE.SpotLight(FLUORESCENT, 13.0 * p.lampGain * p.troffCast, 6.0, 1.25, 0.7, 2);
+      cast.position.set(pos.x, pos.y - 0.02, pos.z);
+      cast.target.position.set(pos.x, pos.y - 3.0, pos.z);
+      cast.name = `${anchor.name}-cast`;
+      cast.castShadow = true;
+      // 512 per fixture, not 1024. These are 2-3 m throws onto shelving inside
+      // one room, so a 512 map spans about 6 m of cone and gives ~1 cm texels -
+      // finer than the sun's 1.95 cm over the whole site. Four fixtures at 512
+      // cost 4 MB together, against 16 MB at 1024 for detail no pixel resolves.
+      cast.shadow.mapSize.set(512, 512);
+      cast.shadow.camera.near = 0.15;
+      cast.shadow.camera.far = 6.0;
+      cast.shadow.bias = 0.0;
+      cast.shadow.normalBias = 0.015;
+      group.add(cast);
+      group.add(cast.target);
+      troffCasters.push(cast);
+    }
   }
 
   /* ---------------- reach-in cooler ---------------- */
@@ -383,6 +478,7 @@ export function buildInteriorLighting(p: InteriorParams): InteriorBuild {
   const glaze = setupGlazing(p.buildingRoot, p.glazingShadow);
 
   let daylight: THREE.RectAreaLight | null = null;
+  let daylightSpot: THREE.SpotLight | null = null;
   if (glaze.storefront && p.glazingShadow) {
     const box = new THREE.Box3().setFromObject(glaze.storefront);
     const size = box.getSize(new THREE.Vector3());
@@ -390,11 +486,73 @@ export function buildInteriorLighting(p: InteriorParams): InteriorBuild {
     // Everything the tinted glass lets through, as one soft source just inside
     // the glass line, facing into the room. A RectAreaLight emits from one face
     // only, so nothing of this leaks back out onto the forecourt.
-    daylight = new THREE.RectAreaLight(new THREE.Color(1.0, 0.735, 0.475), 2.6 * p.gain, size.x, size.y);
+    daylight = new THREE.RectAreaLight(
+      new THREE.Color(1.0, 0.735, 0.475),
+      2.6 * p.gain * p.rectShare,
+      size.x,
+      size.y
+    );
     daylight.position.set(centre.x, centre.y, box.max.z + 0.06);
     daylight.lookAt(centre.x, centre.y, box.max.z + 2);
     daylight.name = "storefront-daylight";
     group.add(daylight);
+
+    // The same transmitted daylight again, as a source that can be *blocked*.
+    //
+    // This is the aisle transport fix, and the defect it replaces is structural
+    // rather than a wrong number: a `RectAreaLight` in three casts no shadow at
+    // any intensity, so the rect above delivers the whole shopfront's daylight to
+    // every surface whose normal faces it, with no regard for what stands in
+    // between. The far gondola is lit as though the near gondola were not there,
+    // a shelf deck gets the same light as the shelf lip above it, and the room
+    // therefore reads as ambient-lit no matter how the intensity is graded.
+    // Building measured that as 0.99x vertical-contrast asymmetry, the only frame
+    // in its set below 1.0, and correctly concluded the remaining shading is
+    // transport rather than anything bakeable into an object: an occlusion term
+    // baked into a shelf darkens the faces pointing away from the window, which
+    // are the faces the camera cannot see.
+    //
+    // A spot is a poor model of a wall-sized window in one respect - a real one
+    // is an area source with a wide penumbra - and an exact one in the respect
+    // that matters here, which is that its light stops at an occluder. The
+    // penumbra objection is also weaker than it looks now that contact hardening
+    // is the default shadow path: the shelf lip's shadow on the deck 30 cm below
+    // it comes out near-sharp while the same lip's shadow on the floor 1.6 m down
+    // comes out soft, which is what a window actually does.
+    //
+    // Placed just *inside* the glass line, deliberately. The storefront glazing
+    // casts shadow (`glazingShadow`), so a source outside it would be blocked by
+    // the very window it represents - and the failure would be silent, because a
+    // fully-shadowed light looks exactly like a light with the intensity set too
+    // low.
+    daylightSpot = new THREE.SpotLight(
+      new THREE.Color(1.0, 0.735, 0.475),
+      p.spotWatts * p.gain * p.spotShare,
+      // Reach past the back wall, so the falloff in view is the inverse-square of
+      // an unclipped source rather than a hard cut at the range limit.
+      Math.max(14, fp.maxZ - fp.minZ + 8),
+      1.15,
+      // A soft edge, because the aperture is metres wide. This is the cone edge,
+      // not the shadow penumbra; the shadow softness comes from the filter.
+      0.9,
+      2
+    );
+    daylightSpot.position.set(centre.x, centre.y, box.max.z + 0.06);
+    daylightSpot.target.position.set(centre.x, fp.floorY + 0.4, box.max.z + 6);
+    daylightSpot.name = "storefront-daylight-cast";
+    daylightSpot.castShadow = p.spotCasts;
+    daylightSpot.shadow.mapSize.set(1024, 1024);
+    // The room, and only the room. A tight far plane is the whole reason this
+    // costs 4 MB rather than the sun map's 256: depth precision is spent on 12 m
+    // of shop instead of 80 m of forecourt.
+    daylightSpot.shadow.camera.near = 0.25;
+    daylightSpot.shadow.camera.far = Math.max(14, fp.maxZ - fp.minZ + 8);
+    daylightSpot.shadow.bias = 0.0;
+    // Normal-offset rather than depth bias, for the same reason the sun uses it:
+    // depth bias detaches contact shadows, which are the entire point here.
+    daylightSpot.shadow.normalBias = 0.02;
+    group.add(daylightSpot);
+    group.add(daylightSpot.target);
   }
 
   const setDoorOpenAmount = (amount: number) => {
@@ -402,8 +560,8 @@ export function buildInteriorLighting(p: InteriorParams): InteriorBuild {
     // Slightly superlinear: a door cracked 10% lets in far less than 10% of the
     // light, because the leaf itself is still occluding the aperture.
     const t = a * a * (0.4 + 0.6 * a);
-    doorBounce.intensity = 34 * t * p.gain;
-    doorGlow.intensity = 12 * t * p.gain;
+    doorBounce.intensity = 34 * t * p.gain * p.bounceGain;
+    doorGlow.intensity = 12 * t * p.gain * p.bounceGain;
     // Shut, the leaf is part of the tinted screen; swung aside, it transmits.
     if (glaze.doorGlass) glaze.doorGlass.castShadow = p.glazingShadow && a < 0.12;
   };
@@ -416,6 +574,8 @@ export function buildInteriorLighting(p: InteriorParams): InteriorBuild {
     doorBounce,
     doorGlow,
     daylight,
+    daylightSpot,
+    troffCasters,
     glazing: { storefrontShadow: !!glaze.storefront && p.glazingShadow, doorGlass: !!glaze.doorGlass },
     setDoorOpenAmount,
   };

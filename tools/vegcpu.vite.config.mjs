@@ -22,6 +22,7 @@ const ALL = {
   vegwind: "tools/_vegwind-entry.ts",
   vegclump: "tools/_vegclump-entry.ts",
   vegaccum: "tools/_vegaccum-entry.ts",
+  vegalbedo: "tools/_vegalbedo-entry.ts",
 };
 
 // `VEGCPU_ONLY=vegfacet,vegmat` builds a subset.

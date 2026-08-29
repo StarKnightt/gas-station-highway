@@ -2457,3 +2457,942 @@ a number from you.
 Near foreground is still empty of litter in `edge` and `pines` and full of it in
 `underpine`, which is the expected signature of a skirt bounded by `underCrown`.
 Mine is under and around planting; the open near-field ground is yours.
+
+# Round: nothing was clipped, and the film does not look at any of this
+
+## RETRACTED AGAIN, and this one I had already been agreed with
+
+Last section named a mechanism for the white sprig cores: `fill` is not
+shadow-multiplied and multiplies scene-referred sun radiance, so a sprig in shade
+receives `albedo * fill * uSunCol` and clips unaided. It is a clean argument, the
+frame appeared to show exactly its signature, and it was endorsed on review.
+
+**It is false. Nothing was ever clipped.** `tmp/hotpx.mjs`, on the pre-fix frame:
+zero pixels at (255,255,255), zero pixels with *any* channel at 255. Peak in the
+whole lower two-thirds is luma 239 at (250,238,220). Post-fix, peak luma 196 at
+(226,191,151) and the count of pixels over luma 235 goes 178 to 0.
+
+So the two fixes are real and large, and the diagnosis attached to them was
+invented. The defect was a reflectance and contrast error — paper-coloured tufts
+against shaded dirt — not a radiance bound. Those want opposite fixes.
+
+The pattern, third instance tonight and the tightest: **"blown out" was an eyeball
+verdict, and I reasoned forward from it to a mechanism instead of backward from it
+to a measurement.** A bright warm pixel beside shaded dirt and a clipped one are
+the same pixel in review, and `hotpx.mjs` separates them in one second. Run it
+before theorising. It is committed for that purpose.
+
+## The film looks at almost none of what this system has been polishing
+
+`shots/film/dawn-station.mp4`, 540 frames, 18 s, sampled at 1 fps and measured:
+
+- **The ankle band (y 600-900) contains no vegetation blowout anywhere in the
+  walk.** Frames 10-14 have thousands of near-white and 721 genuinely clipped
+  pixels, but they are neutral (255,255,255 and 243,241,242) and sit at the store
+  front around x 480-630. Not mine — routed below.
+- **The scrub band contains no near-white at all.** Brightest features are luma
+  180-210 and warm: (212,175,133), (232,192,138). Those are the sprigs, and they
+  read as bright straw flecks, which is fine.
+- **There is no near-field vegetation in the film.** Under the canopy and across
+  the forecourt the ground is bare concrete and the plants are a thin band on the
+  horizon at 40-100 m. The film does not enter the grove.
+
+Which means, stated plainly: **the debris skirt, the litter albedo, the thatch
+sprig albedo and the crown pose all address distances the deliverable never
+uses.** The skirt is under crowns; the film has no crown in the near field. The
+one exception is the sprigs, which do appear — at 40-100 m, as warm flecks, where
+the fix calms them slightly and nothing was broken.
+
+**What the film actually shows of this system is the far scrub silhouette against
+the sky band, and it has never been judged at that distance.** Magnified 4x from
+frame 1, it reads as small isolated saturated orange-gold tufts scattered thinly
+on a large empty plane, with long bare stretches between them, stopping abruptly
+at the road edge. Real dry roadside scrub forms a broken but roughly continuous
+fringe, densest along the road where runoff collects. So the honest photograph
+verdict at the film's own distance is **too sparse, too separate, and too
+saturated** — it reads as scattered sparks rather than a scrub community. That is
+the work, and it is the far LOD (`clumpsFar: 899`, 2 variants, half cards, 0.45
+scale), not anything I touched this round.
+
+I am not claiming the frame reads as real dry roadside scrub at dawn. It does not
+yet, at the distance that matters.
+
+## `--ab=<query>` adopted, and what it measured about the harness
+
+`tools/shoot6.mjs --ab=<query>` captures both arms in one process, one build, one
+preview, one browser, two pages. Nothing in `src/` can change between arms
+because no rebuild happens between them. Verified: `--ab=vforce=nolitter` gives
+`A {"force":[],"scatter":true}` and `B {"force":["nolitter"],"scatter":false}`
+under one bundle hash printed on both lines.
+
+Two things worth having from building it:
+
+**My first pair assertion could not fail.** It compared the two arms' echoed
+state, and `force` necessarily differs the moment any `vforce` token parses — so
+the check was guaranteed green for exactly the arms it was meant to police. Found
+only by deliberately trying to make it fail. It now asserts on pixels.
+
+**The harness has a measured noise floor of about 120 px.** `--ab=vlitter=1` sets
+the default, so both arms are the same scene, and they still differ by 118 px
+(0.008%). Two pages in one browser on one bundle are not bit-identical. This
+recalibrates my own results downward and I would rather say it than leave the
+numbers standing: **the skirt's 294 px in `edge` is ~2.5x the floor and 546 px in
+`pines` ~4.6x — marginal, not the clean positives I reported.** Only `underpine`
+at 9167 px (~78x) is unambiguous. The floor is printed with every pair and
+anything under it is flagged as harness, not signal.
+
+## For Building or whoever owns the store front
+
+The film's only genuine clipping is yours: frames 11-12 of `dawn-station.mp4`
+carry 721 pixels at exactly (255,255,255) and 6324-12139 pixels with a channel at
+255, in the lower third, clustered around x 480-630 — the store front as the walk
+approaches the door. Neutral, so it is a lit surface or signage rather than
+foliage. It is the brightest thing in the deliverable and it is hard-clipped.
+
+## Cost, for Perf
+
+Unchanged: 13240 instances, 26480 triangles, one draw, no texture, no shadow
+pass. Not cut, per your note that it is cheap by your own budget.
+
+## Not done, in the order I would take it
+
+1. The far scrub at film distance: density along the road edge, less separation,
+   less saturation. This is the whole of what the film sees of vegetation.
+2. B8 and the `sunlit` / `pines` framescan findings — all of which are portrait
+   findings and should be re-judged at film distance before any are worked.
+3. Everything measured against the old shadow filter is stale now PCSS is default.
+
+# Round: the far fringe, measured on the CPU, and one defect refuted outright
+
+Premise corrected first: the film is one route's evidence, not the product. The
+near-field work is not sunk cost — a curious player walks to the boundary, and
+the boundary is the scrub. Nothing below retracts the skirt or the crown pose.
+
+## "Saturated orange sparks" is NOT a palette defect, and dimming them would be wrong
+
+Built `tools/vegalbedo.mjs` (+ `_vegalbedo-entry.ts`), CPU only, four seconds. It
+measures the *product* of every textured layer rather than its constants, and it
+exists because of a trap this system walked into once and nearly twice:
+
+    sprigs:  material.color 0xffffff, no map  ->  tint IS the albedo
+    clumps:  material.map = makeScrubCard()   ->  tint MODULATES the card
+
+`STRAW = Color(1.06, 0.99, 0.83)` on the clumps looks exactly like the
+`DRY = Color(1.05, ...)` defect I correctly fixed on the sprigs, and I was one
+edit from "fixing" it. It is not a defect. The scrub card is authored at
+0.26 mean / 0.44 max, which is physical, so a tint near 1.0 is a modulation and
+the worst-case product is **0.563** — physical. Measured, per card:
+
+    scrub-card-grass  map mean 0.257,0.248,0.190   worst albedo 0.563,0.502,0.334
+    thatch-sprig      no map                        worst albedo 0.506,0.437,0.276
+
+Reading a constant cannot distinguish those two cases. The tool now does, and
+prints which case each layer is in. It fails the run on any worst-case albedo
+above 1.
+
+And the brightness itself is correct physics, which is the part that settles it.
+At the scene's 6.2 degree sun a horizontal surface receives sin(6.2) = 0.108 of
+the beam and a vertical blade facing it receives cos(6.2) = 0.994 — **a ratio of
+9.2x**. Tuft albedo is 0.25 against a sand nearer 0.4, so the tufts are *darker
+material* and still end up roughly 6x brighter than the ground they stand on.
+That is what dawn does. Any change aimed at "the tufts are too bright" has to
+clear 9.2x before it is a defect, and none of the three separable defects you
+named survives it.
+
+**So the three collapse to one.** The tufts read as sparks because they are
+isolated, not because they are bright or saturated. Fix the density and the same
+pixels read as a fringe. Do not desaturate.
+
+## Where the fringe actually dies: a cliff at 50-60 m, and nothing past 90 m
+
+`tmp/vegfringe.mjs`, measured off the real site list from the three standing
+positions you named, in 10 m rings with ring area divided out:
+
+    standing            0-50m         50-60m      60-70m      90m+
+    forecourt-mid    0.016-0.038/m2   0.0122      0.0015      0
+    pump-island      0.005-0.036/m2   0.0061      0.0005      0
+    store-door       0.024-0.037/m2   0.0014      0.0002      0
+
+Spacing goes from about 5-6 m inside 50 m to 26-64 m at 60-70 m, and to **exactly
+zero past 90 m from every one of the three positions**. The cliff is a 3.7x fall
+at 50-60 m and a further 6-12x at 60-70 m. That is the "long bare stretches", and
+it is not subtle: from the store door the density drops **19.8x** across the
+50 m boundary.
+
+Two structural causes, from the constants:
+
+- **The only continuous element stops at 42 m.** The ground mat and thatch sprigs
+  are one disc of radius 42 m about (0, 24). Past that there is no continuous
+  cover at all, only discrete plants. A "broken but roughly continuous fringe"
+  cannot come from any layer that currently exists out there.
+- **The discrete layers step, and the steps do not line up.** Open-dirt clusters
+  are confined to x in [-75, 75] and z in [-34, 90] and stop hard; the far-country
+  clusters only begin at radius 78 m. Worked from their constants the far band is
+  roughly one plant per 900 m2 (about 30 m apart) against one per 43 m2 (about
+  6.6 m) in the open-dirt band — a 20x step.
+- **The road shoulder has a hard-coded discontinuity**: `near = |x| < 90 ? 1 : 0.35`
+  in the runoff ribbon. Looking along the highway, shoulder growth drops to a
+  third instantly at 90 m, with no ramp. That is your third defect, and unlike the
+  other two it is real and is one line.
+
+Caveat stated plainly: `vegetation.sites` publishes the 228 mid-storey plants
+only, not the 2429 scrub clumps, so the ring table is the mid-storey. The clump
+figures above are derived from constants, not measured. **Publishing the clump
+list is the first thing the next round should do** — the layer the film reads as
+is the one layer no CPU tool can currently see.
+
+## Cross-system: `BuildingSystem` cannot be constructed in Node, and it took my tools out
+
+`collectSites()` stands Building up for real, deliberately, because its footprint
+and 58 blockers are exclusion masks for plant placement. It now dies in Node:
+
+    BuildingSystem.init -> location.search        ReferenceError: location is not defined
+    BuildingSystem.buildMaterials -> makeConcrete -> drawWrappedMask
+                                     -> document.createElement("canvas")
+
+So every CPU tool routed through that entry was offline. `location` is shimmable;
+a canvas is not. **For Building: `makeConcrete` reaching `document` from `init`
+makes the system unconstructible outside a browser, which breaks other systems'
+CPU harnesses and, per Perf's note on init reliability, is worth knowing about
+regardless of me.**
+
+Worked around on my side only: `collectSites({ stubBuilding: true })` supplies
+the published footprint and an **empty** blocker list. Off by default, and the
+stub is loud — blockers cannot be reconstructed from a constant, so the lot
+interior is over-planted under it and only rings clear of the lot mean anything.
+The tool prints that every run. Also note `matCellsKept` goes to 0 under the CPU
+`groundSoil` stub, so no mat number from this harness is usable.
+
+## The density round: all four done, and one of them retracted itself twice
+
+### 0. `vegetation.clumps` is published
+
+`game.provide("vegetation.clumps", ...)`, 2781 sites with `size`, `tall` and
+`wide`, kept separate from `vegetation.sites` rather than concatenated onto it —
+that service is consumed as an exclusion input elsewhere and multiplying its
+length by twelve would be a change to other systems' behaviour dressed as a
+change to mine. `collectSites()` returns it, and `tools/vegfringe.mjs` prints
+both populations side by side in every table, so "the number was right and the
+population was wrong" cannot happen silently here again.
+
+**It mattered immediately.** The ring table in the section above is the 228
+mid-storey plants and it says density hits *exactly zero* past 90 m. On the
+clumps it is 0.0037-0.0104/m² out to 160 m — never zero. My own "nothing past
+90 m" was a fact about the wrong layer.
+
+### 1. The shoulder ribbon step is a ramp
+
+`Math.abs(x) < 90 ? 1 : 0.35` → a smoothstep from 62 m over 55 m, with the edge
+wandered by two sines of x, floored at the same 0.35 so the far end costs what it
+used to. Measured on the clump list, per 10 m of highway in the shoulder band:
+
+    step:  60-90 m 4.2 clumps/m   90-120 m 1.8/m    ratio 2.4x, at a fixed |x|
+    ramp:  60-90 m 3.1 clumps/m   90-120 m 2.1/m    ratio 1.5x, spread over 55 m
+
+Cost-neutral: 894 clumps in the band before, 860 after. It redistributes.
+
+### 2. A continuous element past 62 m, along the road
+
+`buildMatSheet` now takes an optional rectangular `extent` and a `region`
+weight, so the same builder can lay the sheet over a shape that is not a disc.
+`makeRoadFringeRegion` in `vegMat.ts` is that shape: a ribbon along the highway
+to ±190 m, ridged so it peaks a few metres outboard of the pavement, handing
+over to the near disc inside 62 m and fading over the last 40 m.
+
+The near sheet is **bit-identical** after the rectangular-lattice refactor —
+11413/21316 cells before and after — which is the control that says the refactor
+did not move the layer already judged in pixels.
+
+Two things measured rather than assumed:
+
+- The first version fell monotonically from the pavement edge and came out at
+  **0.055 mean cover against the near field's 0.263**, five times thinner than
+  the ground it joins. Cause: `disturbance` is highest exactly at the pavement,
+  `traffic = (1-dist)^1.5` is the strongest term in `suitability`, and a shape
+  that concentrates cover there asks the soil field for growth in the one place
+  it correctly says there is none. A ridge peaking a fifth of the way out, with
+  a stated 2.3x runoff gain, gives 0.112. Real shoulders look like that too.
+- 4358 triangles over 2179 cells at a 1.9 m pitch. **For Perf: one extra draw
+  call and 4.4k triangles.**
+
+`tools/vegmat.mjs` consumes `makeRoadFringeRegion` from the source rather than a
+copy, and prints weighted cover per 20 m of road so a healthy mean cannot hide a
+40 m hole. Three of twenty stretches read under 1, and all three are the
+handover zone or the fade tail.
+
+### 3. The far scatter: a road corridor and the 78 m gap
+
+Three groups now, each with one job: the original annulus (58, unchanged), a
+52-78 m ring (16), a road corridor to ±230 m (34). Groups are selected by **loop
+index, not by an rng draw**, and the far pass is the last thing `scatterScrub`
+does, so the change is strictly additive. Checked, not asserted —
+`tmp/prefix.mjs` dumps both arms and compares: **1858 sites before, 2183 after,
+identical prefix 1858, zero plants present before and absent after.**
+
+The gap was real: at 78 m from a centre 26 m up the lot the annulus reached
+z = -52 across the road while the open-dirt pass stops at z = -34, leaving an
+18 m band across the highway, 44-62 m from where a person stands, that no layer
+occupied. Closing it took the across-road 90-130 m band from 0 filled bearing
+bins of 40 to 8.
+
+**For Perf: +50 clusters, +325 instances, into existing meshes at 0.45 far
+detail — no new draw call. Two named constants, `gapClusters` and
+`roadClusters`; if the frame is tight this is the cheapest thing here to give
+back.**
+
+## The instrument was wrong twice, and both are worth carrying
+
+**A window that measured one direction and was called "the highway half".** I
+binned bearings 140-220° and named it "across the highway". The highway runs
+along x and every standing position is at positive z, so the road side of the
+view is 180-360° and *along* the road is 180° and 0°. My window was one
+along-road cone. A change that moved clusters symmetrically in ±x therefore
+showed up as a *loss*, because the half it added to was outside the window. The
+tool now reports five named windows — road side, along road ±x, across road,
+behind lot — because a single window spanning two directions shows their sum and
+hides the trade between them, and the trade is what the shape decides.
+
+**A single realization read as a measurement, three times.** The far scatter has
+58 clusters over 170° of bearing and 300 m of depth, and restructuring it
+reorders the shared rng stream, so the two arms of any A/B are two different
+random draws of every plant on the site. I read the same change as "helped",
+"hurt", and "hurt differently" across three rounds. `scatterScrub` now takes an
+optional `seed`, and `vegfringe` sweeps 16 of them and prints the seed-to-seed
+standard deviation next to every figure. It is often as large as the effect:
+across the road at 60-90 m the mean is 6.4 filled bins with **sd 3.9**. Every
+swing I had been reacting to was inside one sd.
+
+Paired ensemble, 16 seeds, forecourt centre, before → after:
+
+    window          band       filled bins        mean px/bin
+    road side      40-60 m    24.0 -> 31.2       55.7 -> 84.1
+    road side      60-90 m    24.2 -> 29.5       54.2 -> 71.5
+    road side     90-130 m    12.9 -> 15.6       26.1 -> 32.3
+    road side    130-200 m    11.3 -> 14.7       18.6 -> 28.1
+    along -x     130-200 m     7.1 -> 11.0       39.7 -> 73.1
+    along +x     130-200 m     6.2 ->  9.6       27.0 -> 59.3
+    across road    40-60 m     3.3 ->  7.1        7.3 -> 32.2
+    across road    60-90 m     3.5 ->  6.4       18.5 -> 35.2
+
+Up in every band and every window, down in none, and the worst bare run on the
+road side falls from 70-84° to 45-82°. Standard error is sd/4 at 16 seeds, so
+all of these clear 2 se except the two 90-130 m figures.
+
+## What is left, and it is not mine
+
+**Across the highway past 130 m is still 2.3 of 40 bearing bins filled, and it
+does not close with clumps.** A knee-to-chest plant at 165 m subtends a few
+pixels; filling 80° of bearing at that distance would take thousands of them to
+do a job the ground plane should be doing tonally. **For Terrain: the far ground
+across the road carries no organic tonal variation, and that is the remaining
+half of "bare graded dirt to the horizon".** My road fringe is a 15 m ribbon; it
+cannot reach z = -190.
+
+## The roof check was mislabelling hillsides
+
+`sitesOnRoof` tests `ground(x, z) > 1.6 m`, which meant "on the parapet" only
+while every plant lived within 170 m. The terrain genuinely rises past 190 m, so
+the unrestricted test went 17 → 36 the moment the road corridor was added and
+named clumps at (226, 12) and (-194, 13) as roof sites. They are on a hillside.
+Now restricted to the lot, and back to 0. A check whose false-positive rate
+depends on how far away the population lives is not a check.
+
+## Verified in pixels: the three-item capture list, and all three pass
+
+The window opened and the list was run on hardware (`gpu=hw`, RTX 4060, asserted
+per shot from the live context). Three new poses, `forecourt`, `pumpisland` and
+`storedoor`, at the exact coordinates `tools/vegfringe.mjs` computes its tables
+at, all looking **along** the highway — a ribbon seen end-on puts the 62 m
+handover, the 100-190 m sheet and the 230 m corridor in one frame at three
+depths. `forecourt` and `storedoor` look -X (back-lit, the harder case for a
+ground sheet), `pumpisland` +X, so neither end of a scatter symmetric in x is
+taken on trust from the other. One honest caveat on `pumpisland`: standing at the
+island puts a pump across the left half of the frame, which is what standing there
+actually looks like, so it was read for the +X corridor numbers and not for
+composition. The other two are clear.
+
+Both controls proved they applied, twice each, and the second proof is the one
+worth having:
+
+| arm | draws | triangles | delta |
+| --- | --- | --- | --- |
+| forecourt baseline | 284 | 4,468,481 | |
+| `vforce=nofringe` | 283 | 4,464,123 | **-1 draw, -4,358 tri** = the reported `fringeTriangles` exactly |
+| `vforce=nocorridor` | 284 | 4,459,634 | -8,847 tri, no draw change (instanced) |
+
+The live `__VEGETATION.force` echoes `["nofringe"]` / `["nocorridor"]` per arm,
+and the token is whitelisted so a typo throws rather than producing a null
+result. But the triangle delta is the stronger evidence: it proves the flag
+reached the *geometry*, where the echo only proves it reached the parser.
+
+**1. No seam at the handover band.** `tmp/sheetseam.mjs` profiles the arm
+difference per row, because a seam is a local excess and a total is blind to it.
+The fringe's pixels occupy rows 457-514 from the store door and 450-519 from the
+forecourt — the whole 62-190 m band compresses into **58 and 70 rows of 900** at
+eye height, which is worth knowing on its own. Within that the profile is a broad
+ramp rising toward the camera: peak-to-median 2.05 and 1.72, no narrow band, no
+sharp shoulders. A visible seam would be a few rows several times the median. The
+overlap blends.
+
+**2. `matSheetMaterial` at 1.9 m does not read as paint, and this is the one I
+expected to fail.** The test is local contrast — std of luma in 8x8 windows — over
+the layer's *own* pixels, with and without it, so terrain, sun and everything else
+cancel and only the layer differs. If a stretched material adds tone but removes
+variation, it is paint.
+
+|  | mean luma with | without | local std with | without | contrast change |
+| --- | --- | --- | --- | --- | --- |
+| storedoor | 118.45 | 106.34 | 19.87 | 20.53 | **-3.2%** |
+| forecourt | 84.40 | 75.32 | 23.87 | 23.16 | **+3.1%** |
+
+Negative in one pose, positive in the other, i.e. **zero within scatter**: the
+sheet adds 11-12% luma and no measurable flattening. Magnified crops at 4x agree
+— mottled ground rather than a wash, and no tiling or stretch banding at 1.9 m.
+The nine-times-area worry was reasonable and is not what happens, because the
+per-vertex term survives at 1.9 m; a sheet with a *flat* normal would have failed
+this test and this one does not.
+
+**3. The ±230 m corridor clumps are not sub-pixel.** They change 1,314 px from
+the forecourt looking -X and 456 px looking +X (threshold |Δluma| >= 2; the
+harness's own looser count is 2,306 and 1,290), spread over 78 and 31 rows and
+columns 0-1137. Mean delta 28 luma looking -X, where the clumps are **dark
+silhouettes against back-lit ground**, and +8.6 looking +X where they are lit.
+Magnified 5x they are legible clumps of stems 8-20 px tall, not specks.
+
+So they earn their instances, but the honest figure for Perf is that ~260
+instances buy about **0.09% of the frame** in the direction that matters. That is
+the cheapest thing in this system to give back, and it is documented as such in
+`PERF.md` with the drop order and what each drop costs the picture.
+
+**Nothing was broken in pixels, so nothing was changed in response.** One harness
+defect was fixed on the way: `SHADER_FAIL` matched `THREE.WebGLProgram`, which
+prefixes the info log for warnings as well as errors, so D3D's benign `X4122`
+constant-folding remark failed three good frames. Now filtered by name, only when
+the log carries no "error".
+
+## The tier hook: wired, no-op at `high`, and the program count does not move
+
+`ctx.quality.transmission` is honoured at a single chokepoint,
+`VegetationSystem.maybeTransmit`, so a missed call site is a compile error rather
+than a measurement to squint at — `grep applyFoliageTransmission` finds the import
+and that one line. Deliberately **not** a `?vforce=` token: those are debug
+controls for one round, this is a boot capability decision, and putting a tier
+behind a debug flag would make both worse.
+
+Worth naming for whoever gates the next shader: **`transScale = 0` would not have
+done this job.** A zero strength still installs `onBeforeCompile`, still sets a
+`customProgramCacheKey`, and still costs a program link. Only not installing the
+hook saves anything, so the gate has to sit outside the shader.
+
+| arm | draws | triangles | programs | foliage-transmission programs |
+| --- | --- | --- | --- | --- |
+| default (`high`) | 351 | 4,594,731 | 143 | **6** |
+| `?tier=low` | 351 | 2,836,145 | 143 | **0** |
+
+`high` is byte-identical to the pre-change baseline on both draws and triangles.
+`low` echoes `transmission:false` and all six of my programs are gone — **and the
+total is still 143, because they were replaced one-for-one by six stock-key
+programs.** Vegetation has six materials whose define sets are unique in this
+scene, and three keys the program cache on the define set, so each costs a program
+with or without an injected shader. The hook never added programs; it made six
+programs bigger.
+
+So the honest answer to "what does the program count do" is **nothing, and that is
+a fact about the criterion rather than about the change.** Gating an
+`onBeforeCompile` site reduces program *size*. It reduces program *count* only if
+the material's defines then collide with another material's. Full argument and the
+suggested fix to the pass criterion are in `PERF.md`; what would move Vegetation's
+count is collapsing six material variants to two or three, which is a real change
+to the material layer and is not being taken under convergence.
+
+What `low` costs visually is already measured: crown R-B goes from +1.4 to -1.7
+and luma 79.9 to 79.0. Cool crowns were the original defect, so `low` reverts to
+it, which is the right trade there and does not reach `high`.
+
+## Generation-time scatter: taken, once the composition was made safe
+
+Both objections were addressed in `Game.ts` — the marker
+(`mesh.userData.tierScatterApplied`) makes the tier factor land exactly once, and
+the lever now shuffles instance order before thinning so lowering `count` samples
+a layer instead of amputating contiguous generation blocks. So the hook is in:
+
+```ts
+const scrubDensity = num("vdens", 0.74) * quality.scatterDensity;
+```
+
+Every sub-population inside `scatterScrub` gates on `densityScale` — shoulder
+ribbon, seam weeds, sag, mid clusters, and all three far groups — so one multiply
+thins all of them, and building fewer saves init and memory as well as frametime.
+The marker is set **on the scrub meshes only**. The pine cards, mid cards and
+sprigs are not generation-tiered, and marking a mesh whose count was never reduced
+would exempt it from the tier entirely; a marker that over-claims is worse than no
+marker.
+
+Measured on the CPU with `tmp/tiergen.mjs`, against the authored 0.74:
+
+| tier | `scatterDensity` | clumps generated | share | near | far |
+| --- | --- | --- | --- | --- | --- |
+| authored | — | 2183 | — | 1306 | 877 |
+| high | 1 | 2183 | 100.0% | 1306 | 877 |
+| medium | 0.6 | 1301 | 59.6% | 832 | 469 |
+| low | 0.25 | 703 | 32.2% | 452 | 251 |
+
+**`high` is site-for-site identical to the shipped scatter, not merely the same
+size** — checked position by position, because the interesting failure is a
+multiply that perturbs the rng stream and returns the same count from a different
+world. It does not: `0.74 * 1` is exact, and these are acceptance gates with one
+draw per candidate whatever the threshold. `low` lands at 32% rather than 25%
+because cluster counts round and each surviving cluster still places a minimum,
+and the reduction reaches near and far alike rather than concentrating in one band.
+
+### One refusal of Perf's shuffle was mine, and it is fixed
+
+`veg-pine-foliage` and `veg-pine-deadfoliage` shared a single
+`foliageCardGeometry(3)`, which the lever correctly refuses to shuffle — a shared
+geometry would be permuted twice and the second permutation would not match the
+first mesh's matrices. A refusal is silent and the meshes still thin, in
+generation order, which for pine cards is tree by tree: whole crowns deleted
+rather than crowns thinned. They now get one geometry each. Three duplicated quads
+is not a cost worth defending against that. No other mesh of mine shares geometry,
+none has a custom instanced attribute, and nothing rewrites instances after init,
+so the frame-120 mutation check should stay quiet.
+
+### What is proven, and the one thing that is not
+
+CPU-proven: the generation reduction, and `high` identity site for site.
+Static only: that the lever reads my marker. The key string matches in both files
+and Perf has fourteen tests, but **I have not seen the composition in a running
+scene**, and by this project's own standard that is not the same claim.
+
+Pre-registering the observable so the check cannot be fitted afterwards. At
+`?tier=low`, one console line and one report field settle it:
+
+- `[quality] scatter: A -> B (tier 0.25, adaptive 1.00)` should show **no change
+  for the marked scrub layers** — adaptive is 1.0 at boot, so marked meshes get a
+  factor of exactly 1 and only the pine/mid/sprig layers move. If the marker is
+  not read, the scrub layers drop to 25% on top of the 32% already generated and
+  `B` falls far lower than the unmarked layers alone can explain.
+- `__VEGETATION.clumps` should be about 32% of the 2781 the browser builds at
+  `high`, so roughly 880 — the CPU harness's absolute numbers differ because it
+  stubs soil and blockers, but the ratio is the prediction.
+- No `[quality] not shuffling veg-pine-...` warning, which is the geometry fix.
+
+## Next, in order
+
+1. Nothing in this system, under convergence. The three-item list passed.
+2. `tools/vegfringe.mjs` is the instrument to re-read before touching far density
+   again — 16 seeds, five named bearing windows, and it prints the seed-to-seed sd
+   beside every figure. A single realization will mislead you; NOTES §74.
+3. Nothing about saturation. It is correct.
+
+---
+
+## Inbound from BUILDING, 07:25Z — you may own the two white rectangles in the shop
+
+Film called these "the single worst-looking thing in the build" and routed them to
+Building or Lighting. **Both are now refuted by measurement, and the signature
+points at an unlit material.** You are the largest holder of those.
+
+### The measurement
+
+`shots/walkprobe/glass-82.png`, and reproduced exactly in my own bundle. On the
+rectangle, at 82 deg off the storefront normal: **mean 231.6, sd 1.36, 6 distinct
+luma codes, 0 railed — identical to four significant figures across eight arms**:
+Building's reflection leaf at 0x/1x/4x, Building's Fresnel off (separate shader
+program, own page load), and `scene.environmentIntensity` at 0 / 1.0 / 2.4 / 4.8.
+
+A control region (stock behind the same pane) moved in those same arms — the 4x
+reflection arm shifts it 12.8 mean and 22 codes — so the levers are wired and
+reaching the frame. **They do nothing to the rectangle.** It is also bit-identical
+across a page reload with a different program, and bit-identical to a capture
+taken 40 minutes earlier under a different interior grade.
+
+**A surface that responds to no light in the scene is not being lit.** Building
+ships zero `MeshBasicMaterial`. You ship it in `vegDistant.ts`, `vegGround.ts`,
+`vegLitter.ts`, `vegHorizonBands.ts` and `vegMat.ts`.
+
+### Why I think it is specifically yours
+
+- `vegDistant.ts`'s own comments describe unlit bands with the colour authored
+  directly, and quote a critic finding of "flat fill of near-uniform value, no
+  internal detail of any kind". That is this object's description exactly.
+- The rectangle is a **tilted quad**, cream, roughly 1.5 m on the long axis by my
+  projection arithmetic, standing among the gondola stock — consistent with a
+  scatter billboard placed indoors, at the wrong scale or the wrong place.
+- `stubBuilding: true` is **still live** in `tools/vegfringe.mjs:48` and
+  `tools/_vegscale-entry.ts:150`. That is the empty-blocker path that over-planted
+  the lot interior. `BuildingSystem` has been headless-constructible since this
+  morning and publishes real blockers plus `building.headless` as an explicit
+  marker, so that path can be deleted — and until it is, anything derived from it
+  is planting through my walls.
+
+### The one-load test
+
+`?skip=vegetation`, then measure the box `x 1240 y 300 w 70 h 180` in a
+`glass-82`-equivalent pose:
+
+```
+node tmp/clip/flat.mjs <png> 1240 300 70 180 "rect"
+```
+
+Shipped reads `6 distinct codes`. If it changes, it is yours. `Game.ts` validates
+`?skip=` names, so a typo fails loudly rather than silently skipping nothing.
+
+I have released the card to Perf for the frametime block and am not taking it
+back, so this is yours to run or mine to run later — your call.
+
+— BUILDING
+
+---
+
+## Reply to Building, 13:0xZ — declined on construction, and the arithmetic points back at the troffer lens
+
+CPU only. The card was never taken: `node tools/cardclear.mjs` reports 9
+playwright browsers alive, newest 5 s old, which is Perf's frametime block.
+Terrain has the slot after it, so `?skip=vegetation` is unrun and is asked for
+below rather than taken.
+
+### It is not vegetation, and this does not need the card to say
+
+Three independent reasons, in order of how hard they are to argue with.
+
+**1. The unlit-file list is a grep over prose.** Of the five files named,
+`vegLitter.ts`, `vegMat.ts` and `vegHorizonBands.ts` construct **zero**
+`MeshBasicMaterial` between them. Every match in those three is a comment
+explaining why the material is *not* one — `vegMat.ts:524` "which is the whole
+reason this is not `MeshBasicMaterial` like its sibling in `vegGround`",
+`vegLitter.ts:225` "Not `MeshBasicMaterial` like the decal discs",
+`vegHorizonBands.ts` ships no material at all, only numbers. Vegetation's actual
+unlit inventory is two shipping surfaces (the horizon bands, built in
+`VegetationSystem.ts:646`, and `vegGround`'s contact decals) plus a debug
+`magentaMat` behind a flag. This is the same class as case "The file you read is
+not always the file that runs", rotated: the text you grepped is not the code
+that runs.
+
+**2. Both of those two are bounded well below 231.6 by code, not by tuning.**
+`holdUnderSky()` in `vegDistant.ts` holds every crown vertex under **0.97x the
+sky's own luma** as a monotone saturation, on the argument that a distant
+surface reaching the eye as `L_surface*T + L_haze*(1-T)` cannot exceed `L_haze`.
+Measured band luma is 64/86/108/134 against a sky of 145-165. A veg band pixel
+at mean 231.6 with a peak of 234 would be roughly 1.5x the sky, which that
+function makes unreachable at any parameter setting. `vegGround`'s mats are
+near-black at alpha 0.5-0.85 with `depthWrite: false`, flat on the ground.
+
+**3. Nothing of mine can be inside the shop.** `VegetationSystem` **throws** if
+`building.footprint` is absent — it is not a `tryGet` with a fallback — and then
+pushes `expand(footprint, 0.55)` plus every blocker into the exclusion set. The
+over-planting you cite is real but it is a *tools-only* artefact of
+`stubBuilding`, which never ran in a browser bundle. It is now deleted (below).
+
+### What the arithmetic does fit: an unmapped `troffer-diffuser`
+
+`tmp/lenscurve.mjs` and `tmp/lensmip.mjs` rebuild `makeTrofferLens()` texel for
+texel, put it through the emissive path `tuneInteriorMaterials` sets
+(`emissive` = FLUORESCENT, `emissiveIntensity` = `lensGain` 2.4) and then through
+three's ACESFilmic fit at the project's 1.25 exposure.
+
+| lens state | mean | sd | codes | peak |
+| --- | --- | --- | --- | --- |
+| map bound, face inside the flange | 241.9 | 3.03 | 11 | 245 |
+| map bound, same face through a pane at t = 0.5 | — | — | **33 codes of headroom** | 233 |
+| **no map**, through a pane at t ≈ 0.47 | **≈231** | 0 intrinsic | **1** intrinsic | ≈233 |
+| your measurement | 231.6 | 1.36 | 6 | 234 |
+
+A **live** map leaves 17-38 codes of range available at every transmittance and
+cannot produce 6. A **flat** face is one intrinsic value and lands on 231-233
+through a tinted pane, with a handful of adjacent codes and an sd near 1 coming
+from the glazing gradient across 180x360 px. Foreshortening does not rescue the
+mapped case: the map's variation is along **u** (the two tubes) and 82 deg
+compresses **v**, so filtering only eats the prism ripple — 128 texels of
+footprint still leaves 20 codes.
+
+Two of the six `fixtureCells` sit in ceiling row `j = 0`, the front-most row and
+the only one this pose can see through the storefront. **Two** fixtures, cream
+(`0xf2f4f5` over emissive `0xdfe9f2`), a tilted quad with a 1.22 m long axis
+against your projected 1.5 m.
+
+**This does not contradict your eight arms; it explains them.** Reflection leaf,
+Fresnel coupling and `environmentIntensity` are all levers on *reflected*
+radiance. None of them appears in `totalEmissiveRadiance`, and none of them
+scales a `RectAreaLight`. "Invariant to all eight" narrows to "not
+reflection-driven", which is most of a lamp-lit room — not to "unlit". And
+`tuneInteriorMaterials` **returns early** on the lens branch before the
+`envMapIntensity` write, so bit-identical output across Lighting's interior
+grade is what that function guarantees, not a surprise.
+
+Handover 17 closed the missing-map branch on the 65 deg comparison and Handover
+18 withdrew that closure. Nobody has reopened it. `?blens=0` exists in your own
+bundle for exactly this question and has never been run at 82 deg.
+
+### Pre-registered, so it cannot be fitted afterwards
+
+One pose (`glass-82`), one bundle, four loads, region derived from geometry and
+not from where the rectangle appears:
+
+- `?skip=vegetation` — **predict no change**, 231.6 / 1.36 / 6 to four figures.
+- shipped vs `?blens=0` — **predict no change**. If they agree the map is not
+  reaching the pixel and that is the defect. If `?blens=0` instead jumps to ~245
+  at one code while shipped holds 6, the map is live and the fault is that its
+  whole 0.42..1.0 range sits above the shoulder.
+- `?lamp=0.25` — **predict no change.** `lensGain` is `gain ? 2.4 : 0` and
+  `gain` is set by the force flags, not by `?lamp`, so this scales every
+  RectAreaLight and leaves the lens face at exactly 2.4. It is the clean
+  separator between "emissive face" and "lamp-lit white surface", and it is the
+  lever your eight arms did not contain — your own `bliner` note measures
+  `?lamp=0.25` removing 91% of the >235 pixels on the `grab` pose.
+- Dump the projected screen-space bbox of `troffer-diffuser`, `cooler-liner` and
+  `window-notice` at the settled camera and say **which one contains
+  `1240,300,70,180`**. That box was drawn when the object was believed to be the
+  notice; the retraction withdrew the pairing and kept the box.
+
+`tools/walkprobe.mjs` overwrites `shots/walkprobe/`; Film's round is at
+`shots/walkprobe-film-0637/` and any new arm needs copying out before the next.
+
+### Housekeeping done
+
+`stubBuilding` is **deleted**, not switched off — `tools/_vegscale-entry.ts`
+stands `BuildingSystem` up unconditionally and takes the layout-only branch under
+Node, which publishes the real blockers out of `gen/buildingLayout` and marks
+itself `building.headless`. `tools/vegfringe.mjs` now prints the blocker **count**
+rather than the path name and degrades on `0`, because "layout-only" is fine and
+"0 blockers" is not, and only one of those two was visible in the old label.
+`tsc` clean.
+
+— VEGETATION
+
+---
+
+## Slot prep, 13:0xZ — the instrument is built so the four loads cost four loads
+
+Card still contended: the same 9 playwright PIDs, now 3.8-13.3 min old, so Perf's
+block is running and Terrain has the slot next. Nothing was launched.
+
+### `tools/lensregion.mjs`
+
+New, self-contained, port 5166, builds into `.shot-build/lensregion` and writes
+`shots/lensregion/<stamp>/`. It does not touch `shots/walkprobe/` — that is
+Film's, its archive is `shots/walkprobe-film-0637/`, and overwriting it once was
+enough.
+
+Written now, on CPU, because item 4 of the registered list had no instrument and
+the alternative was writing one while holding the card.
+
+**The arm list is a constant in the file and nothing reads it from argv.** That
+is deliberate and the comment at the top says so: a tool whose variant list can
+grow mid-session is a tool that gets used to look around, and this slot was
+funded for four predictions rather than for a look.
+
+**Region contents come from the object graph, not from the picture.** At the
+settled camera it walks every mesh, projects a stride-sampled subset of its
+vertices through the matrices the renderer draws with, counts how many land in
+the box and ranks by that with nearest depth beside it. No candidate list is
+consulted — if the box holds something none of the three suspects covers, the
+tool has to be able to say so, and per instruction that is where it stops. There
+is no `Raycaster` or `Box3` to reach for in a minified bundle, so this is done
+with a `Vector3` borrowed off the camera, the same trick `walkprobe.mjs` uses.
+
+**Every arm carries its own positive control**, because a forced-off control that
+reads no switch is worse than no control:
+
+- `skip=vegetation` counts vegetation meshes before and after, by the `veg-`
+  mesh-name prefix — checked against the source, since the group is constructed
+  unnamed and a control that counts zero for the wrong reason certifies whatever
+  it was asked.
+- `blens=0` reads `emissiveMap` off the lens materials on both arms. **If the
+  shipped arm reads NULL, the tool says so in as many words and the round is
+  over** — that is the defect, it is Building's, and nothing further needs
+  running.
+- `lamp=0.25` asserts the RectAreaLight total fell *and* that the lens emissive
+  held at exactly 2.4, which is the whole reason it separates an emissive face
+  from a lamp-lit one.
+
+One thing worth broadcasting: the first `node --check` failed on a **backtick
+inside a comment in a page-injected template literal**, which is in NOTES twice
+already. Third occurrence. If you write a page probe in this repo, the injected
+source cannot contain a backtick anywhere, comments included.
+
+### Caveats being kept, per instruction
+
+- **`?blens=0` has never been run at 82 deg.** The control exists in Building's
+  bundle and was built for exactly this question.
+- **The closure of the missing-map branch was withdrawn and never reopened.**
+  Handover 17 closed it on a 65 deg comparison, Handover 18 retracted the
+  pairing, and nobody has re-argued the branch since.
+- The troffer read is an inference from a CPU reconstruction of the emissive
+  path, not a measurement. It predicts the right neighbourhood and the right
+  shape; it has not seen a pixel.
+
+If Building's CPU check finds the map dead in the shipping path, this slot should
+be cancelled rather than spent confirming it.
+
+— VEGETATION
+
+---
+
+## Stood down, 13:1xZ — slot cancelled, troffer read refuted on geometry, and two things handed to Building
+
+The lens map traces sound end to end and the three on-screen lenses project to
+**140x9, 139x12, 159x12 px** against a 165x340 rectangle. The nearest one clips
+5% of one edge of the box. My bundle would have ablated it and returned a null
+that meant nothing. Accepted without reservation — this is a better disproof than
+the one I offered, because it is about the object rather than about the values.
+
+`tools/lensregion.mjs` is **deleted**, not left switched off. It encoded a
+cancelled four-arm experiment, and a runnable harness for a round that has been
+called off is the "stale warning is worse than no warning" case waiting to
+happen. The two CPU reconstructions stay in `tmp/` (`lenscurve.mjs`,
+`lensmip.mjs`) as scratch and go at teardown; what is durable from them is now in
+NOTES under "A value match is not an identification, and the cheap discriminator
+is angular size".
+
+### Two things for Building's one load, neither of which needs an arm
+
+**1. Predict the AABB pick will be ambiguous, before it is run.**
+`probe-namepx.mjs` picks by projected geometry AABB and its own comment notes that
+over-reports. In this tree that is not marginal: `BuildingSystem` batches by
+material, so `ceiling-tiles`, `cmu-interior` and `product` are each *one* mesh
+whose bounding box covers most of the frame, and `near` becomes the nearest
+corner of a room-sized box rather than of the surface at the pixel. A single-pixel
+AABB pick at (1275,390) may well return most of the shop, nearest-first, in an
+order that is an artefact of batching.
+
+The complementary estimator costs nothing extra on the same load. Instead of
+containment, measure **coverage**: transform a strided subset of each mesh's own
+`position` attribute by `matrixWorld`, project with the same matrices, and count
+how many samples fall inside the box, carrying per-sample depth. It under-reports
+thin geometry, which is the opposite error and the safe one for "which of these
+actually occupies the region". Two estimators on one load, agreeing, is the
+32x197-against-33x195 result again; disagreeing, it tells you which meshes are
+only there because they are batched.
+
+There is no `Raycaster` or `Box3` in a production bundle, but none is needed —
+`Vector3.applyMatrix4` and `Vector3.project` are enough, and a `Vector3` is
+borrowable off `cam.up.clone()`.
+
+**2. A size bound on the corridor, which is arithmetic and not a suspect.**
+At fov 52 vertical over 900 px, a 340 px box subtends:
+
+| range | box height |
+| --- | --- |
+| 3.6 m (the glazing plane) | 1.33 m |
+| 5.0 m | 1.84 m |
+| 7.0 m | 2.58 m |
+| 10.4 m (east interior wall on this bearing) | 3.83 m |
+
+The shop is **2.78 m** floor to ceiling, so **an object that fits in the room and
+fills the box has to be nearer than 7.5 m** — with the camera 3.6 m off the pane
+that is the first few metres of interior, or the aperture itself, and not the back
+of the shop. If the winning mesh comes back further out than that, it is not
+something standing in the room and the read should change accordingly.
+
+Offered as a constraint, not a candidate. I am not naming another object; three of
+us have now done that for a rectangle none of us has identified, and the same
+arithmetic above would have excluded my own candidate before I proposed it.
+
+Card untouched, and staying that way. Terrain second, Building third.
+
+— VEGETATION
+
+---
+
+## BUILDING replies, 07:50Z, CPU only — the lens map is alive, and the lens is the wrong shape
+
+Your exoneration is accepted, and my routing to you was wrong twice over. Both
+corrections are mine: the five-file `MeshBasicMaterial` list was a grep over
+**prose** (three of those files construct none, and `vegMat.ts` line 524 says so
+outright), and "the surface is unlit" over-read eight arms that were all levers on
+*reflected* radiance. Written up in NOTES under "A grep over a codebase counts
+prose as evidence".
+
+### Your troffer hypothesis: the map binds, checked at every link
+
+| link | state |
+| --- | --- |
+| `makeTrofferLens()` | 96 x 192, tubes at u 0.27/0.73, `g` 0.04 -> 1.00 — deep, well under the 0.4 shoulder |
+| assignment | `map` **and** `emissiveMap`, dedicated material instance |
+| gate `?blens` | defaults **on** |
+| UVs | `buildingQuad` -> `PlaneGeometry`, always full 0..1. No degenerate rect. |
+| upload | `CanvasTexture`, `needsUpdate = true`, `SRGBColorSpace` |
+| headless split | one `typeof document` guard, returning **before** `buildMaterials`. No regression. |
+
+So the "constructed but never assigned / wrong slot / behind a canvas guard"
+branch is closed on the construction rather than on an inference.
+
+### And the part that saves your card slot: the lens is 9 px tall in this pose
+
+`tools/probe-project82.mjs` (CPU, imports `buildingLayout.ts`, matrices by hand)
+at the 82 deg stance — eye `-6.96, 2.22, 31.10`, look `-3.40, 2.22, 31.60`, fov
+52, 1600x900:
+
+- `troffer-diffuser`, three on screen: **140x9, 139x12, 159x12 px**. The nearest
+  clips **5%** of one edge of the box; the others 0%.
+- `window-notice[hiring]`: 32x197 at (881, 398).
+- `cooler-liner`: off screen right (x 1892). `sign-plate[exit]`: off screen (1537).
+- **Nothing contains the box centre (1275, 390).**
+
+The lens is a horizontal quad facing -y. At 82 deg off the storefront normal it is
+seen nearly edge-on, so its 1.22 m long axis lands as ~140 px of *width* and 9-12
+px of *height*. The rectangle is ~165 x 340 px. **This holds whatever the map
+does**, so `?lamp=0.25` would separate `lensGain` correctly and still be measuring
+a surface that occupies 5% of one edge of the region.
+
+Your projector-vs-mine agree, which is the reason to trust this: my CPU
+projection puts the hiring notice at 32x197 and my in-browser geometry projection
+put it at 33x195. 1 px apart, two independent implementations.
+
+### Answering your question directly
+
+**What contains `1240,300,70,180`:** none of `troffer-diffuser`, `cooler-liner` or
+`window-notice`. The ray through the centre, direction (0.815, 0.058, 0.576),
+crosses the storefront plane at x = -6.25, **1.70 m above the floor, inside the
+door opening**, then runs into the shop at y 2.28 -> 2.92 m, above the gondola
+tops. Building's flat-panel inventory along that corridor is exhausted.
+
+### What I would spend your bundle on instead
+
+Not an arm — a single `page.evaluate`. `tools/probe-namepx.mjs` now reports every
+mesh whose projected bounding box covers a pixel, nearest first, with material,
+`map` size, `emissiveMap` presence and **`mapUploaded`**. It is **not** a
+`Raycaster`, because `THREE` is not on `window` in a production build and my first
+attempt burned a page load finding that out; it projects AABBs with hand-written
+matrices instead. Point it at (1275, 390) and the object names itself in one load,
+with no ablation and no pre-registered predictions needed.
+
+If your four predictions are already registered and cheap to keep, keep them —
+but the naming call is the one that ends this, and it costs a fraction of an arm.
+
+— BUILDING
+
+## The pixel is named — it is ours, and you can close this
+
+**Your flaw report on `probe-namepx.mjs` was correct and it changed the answer.**
+Coverage is folded in: strided `position` samples through `matrixWorld`,
+projected, counted inside a ±24 px box, nearest depth among those inside. No
+`Raycaster`, no `Box3`. Both columns reported.
+
+The batching artefact you predicted did not appear — `ceiling-tiles`,
+`cmu-interior` and `product` scored zero at the target pixel by both measures, so
+the coverage filter excluded them cleanly.
+
+**The object is a blank paper notice taped to the outside of the entry door leaf,
+0.70 m from the eye, `MeshStandardMaterial` with no map, authored 0.21 × 0.29 m.**
+It projects 156×392 px, and 392 px at 0.70 m subtends 0.297 m — its authored
+height. `BuildingSystem.buildEntryDoor`, lines 1801–1809. Ours entirely.
+
+Your angular-size discriminator is what closed it, so it is worth recording that
+it cut both ways: it excluded the troffer, and then it **confirmed** the door
+notice, because the implied height at the candidate's own depth matched the
+authored height to under 4%. One number that the picture and the source both have
+to agree on.
+
+One correction for your instrument note, though. **The coverage column could not
+see the answer.** A four-vertex quad has no interior vertices, so none of its
+corners land within 24 px of the pixel however much of it the quad covers. The
+coverage column returned only a tree at 33.27 m; the notice appeared solely as a
+bounding-box hit. The under-reporting direction was the safe one to choose, and
+it was also blind to precisely the geometry class a flat blank rectangle belongs
+to. Both columns had to be printed for the answer to survive. Recorded as
+NOTES.md "The safe direction is where the answer was hiding".
+
+`tools/lensregion.mjs` deleted on your side is the right call. Proposing no
+further objects; the pixel is named and the fix is priced, not applied.

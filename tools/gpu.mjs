@@ -66,6 +66,72 @@ export function launchOptions({ allowSoftware = false } = {}) {
 }
 
 /**
+ * Launches Chromium against a **persistent, reused** profile directory, so the
+ * driver's on-disk shader cache survives between runs.
+ *
+ * WHY THIS IS NOT A MICRO-OPTIMISATION
+ * ------------------------------------
+ * A cold load of this scene is 192-349 s, of which ~92% is the driver compiling
+ * and linking shaders. A warm one is ~21 s. **The warmth is a property of the
+ * profile directory, not of the machine and not of the driver**: every fresh
+ * `mkdtemp` profile measures cold even on a host that has compiled these exact
+ * shaders many times over.
+ *
+ * `chromium.launch()` creates a throwaway profile and discards it, so **every
+ * run pays the full cold cost regardless of what ran before it.** Within one
+ * browser process, later contexts do inherit warmth from earlier ones, which is
+ * why a pre-warm page works — but only within that process, and only if the
+ * pre-warm actually waits for compilation rather than for `domcontentloaded`.
+ *
+ * WHEN NOT TO USE THIS
+ * --------------------
+ * **Never for anything measuring load time.** `firstload.mjs` and `coldload.mjs`
+ * exist to measure the cold path, and a warm profile would silently delete the
+ * phenomenon — the most expensive possible outcome, because the run would
+ * succeed and report a healthy 21 s. Use this only where load time is setup cost
+ * rather than the measurement: frametime runs, capture rounds, audits.
+ *
+ * Returns a `BrowserContext` (not a `Browser`), because that is what
+ * `launchPersistentContext` gives. `context.browser()` provides the `Browser`
+ * for a `disconnected` handler and for teardown.
+ */
+export async function launchWarmProfile({
+  tag = "shared",
+  viewport = { width: 1920, height: 1080 },
+  deviceScaleFactor = 1,
+  allowSoftware = false,
+} = {}) {
+  const { chromium } = await import("playwright");
+  const path = await import("node:path");
+  const fs = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  // Under tmp/, which is gitignored. Deliberately NOT cleaned up on exit: the
+  // whole value is in it persisting to the next run.
+  const dir = path.join(root, "tmp", "profiles", tag);
+  fs.mkdirSync(dir, { recursive: true });
+  const firstEver = !fs.existsSync(path.join(dir, "Default"));
+
+  const opts = launchOptions({ allowSoftware });
+  const context = await chromium.launchPersistentContext(dir, {
+    ...opts,
+    viewport,
+    deviceScaleFactor,
+  });
+
+  console.log(
+    `[gpu] persistent profile "${tag}" at ${path.relative(root, dir)}` +
+      (firstEver
+        ? ` — FIRST USE, so this run pays a cold shader compile (expect 3-6 min). Warm it\n` +
+          `      outside any timed window if the timing of this run matters.`
+        : ` — reused, so the shader cache should be warm`)
+  );
+
+  return context;
+}
+
+/**
  * Reads the real renderer string out of a live WebGL2 context, plus the
  * anisotropy cap and the WebGPU adapter description when one exists.
  */

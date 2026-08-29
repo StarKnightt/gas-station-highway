@@ -3,15 +3,39 @@ import type { GameSystem, SystemContext } from "../core/types";
 import type { StationAudio } from "../audio/api";
 import type { PumpFaceHandle } from "./PumpSystem";
 import { COOLER_CLOSER, DOOR_CLOSER, InteractHinge } from "./interactHinge";
+import { Reticle } from "./reticle";
 
 /**
  * System 7 — the three things you can do here.
  *
  * Fuel a pump, work the storefront door, open the cooler and take a bottle.
- * That is the whole list. There is no HUD, no crosshair, no prompt and no
- * inventory: the only affordance is that you are stood in front of something
+ * That is the whole list. There is no prompt, no key hint, no object name and
+ * no inventory: the affordance is that you are stood in front of something
  * real, close enough to touch it, and the world responds when you press the
- * button. Everything this system publishes to the player is diegetic.
+ * button. Almost everything this system publishes to the player is diegetic.
+ *
+ * The one exception, added deliberately and against the paragraph above: a
+ * small centre-screen reticle that brightens when the reach ray is on
+ * something usable, with a one-line prompt naming the action. The reasoning is
+ * in `reticle.ts` and it is narrow — the scene is going to be recorded, and on
+ * camera a player hunting for the pixel a pump responds to is
+ * indistinguishable from a pump that does not work. The prompt was added after
+ * the user walked the build and asked to be told what the action is.
+ *
+ * ## One ray, one reach, four consumers
+ *
+ * **The dot, the wording, the E key and the mouse click all go through
+ * `pick()` at the same `REACH_M`.** That is not an implementation detail. A
+ * reticle with its own ray would disagree with the click at the boundary, and
+ * a mark that lights up over something a click then misses is worse than no
+ * mark. Worse still is a prompt: text that says "press E" while only the mouse
+ * works, or that names a verb the toggle does not perform, is a specific
+ * promise the software then breaks. So the wording is derived in `promptFor()`
+ * from the same hinge and session state that `act()` branches on, and `act()`
+ * is reached from exactly one place per input.
+ *
+ * `?reticle=1` stands in for pointer lock, because headless Chromium cannot
+ * enter it. It gates the reticle *and* the E key together — see `engaged()`.
  *
  * It owns no geometry. Every object it drives belongs to another system and is
  * reached through the service registry, so every lookup is optional and every
@@ -111,6 +135,42 @@ export interface InteractReport {
   click(): { kind: string; name: string; distance: number } | null;
   /** What the ray is on right now, without acting on it. */
   probe(): { kind: string; name: string; distance: number } | null;
+  /**
+   * The hover the reticle is currently showing — the *cached* result of the
+   * last per-frame `pick()`, not a fresh one. Deliberately distinct from
+   * `probe()`: this is what the player is being told, `probe()` is what is
+   * true this instant, and a harness checking that the reticle does not lie
+   * needs to be able to compare the two.
+   */
+  hover(): HoverReport;
+  /**
+   * Drive a cooler leaf without aiming at it. Test hook, in the same class as
+   * `look()`: it sets up world state, it is not an input under test.
+   *
+   * It exists because of a circularity in verifying the reach priority. The
+   * only way to shut an open leaf through the normal route is to point at it
+   * and press E — but pointing at an open leaf with a bottle behind it now
+   * resolves to the bottle, which is the behaviour being verified. So a harness
+   * that used the key to arrange the scene could not test what the key does.
+   *
+   * It calls the same `toggle()` the interaction does, so the leaf, its closer
+   * and its audio behave exactly as they would; only the targeting is skipped.
+   */
+  setCooler(index: number, open: boolean): boolean;
+}
+
+export interface HoverReport {
+  /** Null when the ray is on nothing usable, or while the reticle is hidden. */
+  target: { kind: string; name: string; distance: number } | null;
+  /** Whether the reticle is on screen at all, i.e. pointer lock is engaged. */
+  active: boolean;
+  /** The exact wording the prompt is showing for this target, or "". */
+  prompt: string;
+  /** Mean cost of the per-frame hover ray, microseconds, over `samples`. */
+  costUs: number;
+  samples: number;
+  /** How many times each input has fired an interaction. See `engaged()`. */
+  activations: { pointer: number; key: number };
 }
 
 export class InteractionSystem implements GameSystem {
@@ -138,6 +198,32 @@ export class InteractionSystem implements GameSystem {
   private sentDoorAmount = -1;
   private sentTickRate = -1;
 
+  private reticle: Reticle | null = null;
+  /**
+   * `?reticle=1` shows it without pointer lock. Headless Chromium cannot enter
+   * pointer lock from a scripted call, so a capture harness has no other way
+   * to photograph the thing — and photographing it is the whole point, given
+   * this project's history of correct code never reaching the screen.
+   *
+   * It is an OR into one visibility predicate and touches nothing else: the
+   * classes, the styling and the reach test are the same on both paths, so a
+   * frame captured under the flag is the frame a locked player sees. The
+   * pointer-lock arm is verified separately, in the browser, against the real
+   * `pointerlockchange`.
+   */
+  private forceReticle = false;
+  private hover: { kind: string; name: string; distance: number } | null = null;
+  private hoverPrompt = "";
+  private hoverActive = false;
+  private hoverCostUs = 0;
+  private hoverSamples = 0;
+  /**
+   * Counted per input rather than in total, so a harness can prove the E key
+   * ran the interaction itself instead of inferring it from a side effect that
+   * a stray click could equally have caused.
+   */
+  private activations = { pointer: 0, key: 0 };
+
   private calls: CallRecord[] = [];
   private services: Record<string, number | boolean> = {};
   private pending: { fn: () => void; t: number }[] = [];
@@ -155,6 +241,14 @@ export class InteractionSystem implements GameSystem {
     // unlocks the context and performs the interaction. The one-shots fired
     // before the graph exists are queued and flushed below, so nothing is lost.
     ctx.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
+    // On `window`, not the canvas: under pointer lock the canvas does not hold
+    // keyboard focus, and PlayerSystem's WASD listener is on `window` for the
+    // same reason. Gated on `engaged()` so a press before the player has taken
+    // control cannot silently start a pump behind the HUD card.
+    window.addEventListener("keydown", this.onKeyDown);
+
+    this.forceReticle = new URLSearchParams(location.search).get("reticle") === "1";
+    this.reticle = new Reticle();
 
     window.__INTERACT = {
       services: this.services,
@@ -179,7 +273,106 @@ export class InteractionSystem implements GameSystem {
         const hit = this.pick();
         return hit ? { kind: hit.target.kind, name: hit.name, distance: hit.distance } : null;
       },
+      hover: () => this.hoverReport(),
+      setCooler: (index, open) => {
+        this.resolveTargets();
+        const h = this.coolers[index];
+        if (!h) return false;
+        if (h.isOpen !== open) this.toggleCooler(index);
+        return true;
+      },
     };
+  }
+
+  private hoverReport(): HoverReport {
+    return {
+      target: this.hover,
+      active: this.hoverActive,
+      prompt: this.hoverPrompt,
+      costUs: this.hoverSamples ? this.hoverCostUs / this.hoverSamples : 0,
+      samples: this.hoverSamples,
+      activations: { ...this.activations },
+    };
+  }
+
+  /**
+   * Whether the player has control: pointer lock, or the capture flag standing
+   * in for it. Nothing else — in particular this does not consult `ctx.shot`,
+   * because a shot preset is how the reticle gets photographed and the flag is
+   * already the gate on that.
+   *
+   * **One predicate for both the reticle and the E key, on purpose.** They are
+   * the same claim — "the player is driving" — and splitting them would let the
+   * prompt appear while the key it names was still inert, or the reverse.
+   */
+  private engaged(): boolean {
+    if (this.forceReticle) return true;
+    return document.pointerLockElement === this.ctx.renderer.domElement;
+  }
+
+  /**
+   * The wording for a target, and the reason it is here rather than in the
+   * markup or in `reticle.ts`.
+   *
+   * Every branch reads the *same state `act()` reads* and names the verb that
+   * branch will actually perform: `InteractHinge.isOpen` is derived from
+   * `target`, which is exactly what `toggle()` flips, and the pump case tests
+   * the same `session.face` identity that decides start from stop. So the
+   * prompt cannot promise an action the click will not carry out — and a
+   * specific promise that fails is worse than the generic "interact" this
+   * deliberately is not.
+   *
+   * Wording is deliberately plain and lower case apart from the key: this is a
+   * forecourt at dawn, not a game HUD, and "start the pump" is what a person
+   * would say. No object names, no distances, no key glyph boxes.
+   */
+  private promptFor(t: Target): string {
+    switch (t.kind) {
+      case "pump":
+        return this.session && this.session.face === t.face
+          ? "press E to stop the pump"
+          : "press E to start the pump";
+      case "door":
+        return this.door?.isOpen ? "press E to close the door" : "press E to open the door";
+      case "cooler":
+        return this.coolers[t.index]?.isOpen ? "press E to close the cooler" : "press E to open the cooler";
+      case "bottle":
+        return "press E to take a bottle";
+    }
+  }
+
+  /**
+   * The per-frame half of the reticle. This is the only work the reticle adds
+   * to the frame, and it is skipped entirely whenever the reticle is hidden —
+   * so an unlocked page, and every existing `?shot=` capture, costs zero.
+   *
+   * The ray itself is `pick()`, unmodified and unshadowed. See the class
+   * comment: sharing the call is what makes the reticle and the click agree at
+   * the edge of reach, and it is cheap because `pick()` already caps
+   * `raycaster.far` at REACH_M, so three rejects every root whose bounding
+   * sphere is further than 2.2 m before it looks at a triangle.
+   */
+  private updateReticle(): void {
+    const visible = this.engaged();
+    this.hoverActive = visible;
+    if (!visible) {
+      this.hover = null;
+      this.hoverPrompt = "";
+      this.reticle?.set(false, false, "", "pointer lock not engaged");
+      return;
+    }
+    const t0 = performance.now();
+    const hit = this.pick();
+    this.hoverCostUs += (performance.now() - t0) * 1000;
+    this.hoverSamples++;
+    this.hover = hit ? { kind: hit.target.kind, name: hit.name, distance: hit.distance } : null;
+    this.hoverPrompt = hit ? this.promptFor(hit.target) : "";
+    this.reticle?.set(
+      true,
+      !!this.hover,
+      this.hoverPrompt,
+      this.hover ? `in reach: ${this.hover.name}` : "nothing in reach"
+    );
   }
 
   /**
@@ -268,12 +461,81 @@ export class InteractionSystem implements GameSystem {
     if (e.button !== 0) return;
     this.resolveTargets();
     const hit = this.pick();
-    if (hit) this.act(hit.target);
+    if (hit) {
+      this.activations.pointer++;
+      this.act(hit.target);
+    }
+  };
+
+  /**
+   * E, as a genuine alternative to the click rather than a decoration. Same
+   * `resolveTargets()`, same `pick()`, same `act()`, in the same order — the
+   * only difference between the two handlers is which counter goes up, so there
+   * is no second code path that could drift from what the prompt says.
+   *
+   * Left click keeps working exactly as before; this adds an input, it does not
+   * replace one.
+   *
+   * `e.repeat` is dropped because holding E would otherwise re-fire at the
+   * keyboard's repeat rate, and every action here is a toggle — a held key
+   * would start and stop the pump ten times a second. The mouse cannot do this
+   * because `pointerdown` does not repeat, which is why the guard is only here.
+   */
+  private onKeyDown = (e: KeyboardEvent) => {
+    if (e.code !== "KeyE" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!this.engaged()) return;
+    this.resolveTargets();
+    const hit = this.pick();
+    if (hit) {
+      this.activations.key++;
+      this.act(hit.target);
+    }
   };
 
   /**
    * One ray, straight down the camera's forward vector — the player is pointer
    * locked, so the screen centre and the look direction are the same thing.
+   *
+   * ## Nearest-first is wrong for one case, and it made a brief requirement impossible
+   *
+   * The original rule was "first usable thing along the ray". That is right for
+   * everything except a grabbable behind a door you have just opened, and it
+   * made **taking a bottle — one of the three interactions in the brief —
+   * literally unperformable**. From the only spot a player can stand at the
+   * cooler, the probe hit `cooler-door-2` before opening *and after*: the open
+   * leaf swings across the line of sight and sits 0.62 m from the eye, nearer
+   * than the shelf behind it. So the reticle lit, the prompt read "press E to
+   * close the cooler", and every attempt to take a drink shut the door instead.
+   * Nothing was broken except the ordering.
+   *
+   * The rule now is: **the ray reaches *through* a hinge that is physically open,
+   * and a grabbable behind one wins.** That is not a special case bolted on, it
+   * is a better statement of intent — someone who has opened a cooler and is
+   * looking into it is reaching for the contents, not for the door a second
+   * time. Everything else keeps nearest-first.
+   *
+   * Three properties worth stating, because each is a bug this would otherwise
+   * have:
+   *
+   * **A closed leaf still wins.** The walk stops at anything that is not an open
+   * hinge, so the bottle cannot be taken through shut glass — you have to open
+   * the cooler first, which is the interaction the brief asks for.
+   *
+   * **The test is `amount`, not `isOpen`.** `isOpen` reads `target`, the leaf's
+   * *intent*, which flips to 1 on the frame the key is pressed — so keying the
+   * priority to it would let the player reach through a door that is still
+   * physically shut for the 0.9 s the closer takes to swing. `amount` is where
+   * the leaf actually is. The prompt's verb keeps using `isOpen`, and the two
+   * differing is correct rather than an inconsistency: the verb must describe
+   * what the next `toggle()` will do, while the reach has to respect where the
+   * geometry currently is.
+   *
+   * **The prompt follows for free.** `promptFor()` is handed whatever this
+   * returns, so a pick that resolves to the bottle says "press E to take a
+   * bottle" with no second rule to keep in step. Had the priority lived
+   * anywhere else, the wording and the action would have needed separate edits
+   * and could have disagreed — which is the failure the single-pick
+   * architecture exists to prevent.
    */
   private pick(): { target: Target; name: string; distance: number } | null {
     if (!this.roots.length) return null;
@@ -283,15 +545,41 @@ export class InteractionSystem implements GameSystem {
     this.raycaster.far = REACH_M;
 
     const hits = this.raycaster.intersectObjects(this.roots, true);
+    /** Nearest usable hit — what the old rule returned, and still the default. */
+    let nearest: { target: Target; name: string; distance: number } | null = null;
+
     for (const h of hits) {
       if (h.distance > REACH_M) break;
       const target = this.resolve(h.object);
       if (!target) continue;
-      // A bottle already in hand is not something you can pick up again.
+      // A bottle already in hand is not something you can pick up again, and it
+      // is not an obstruction either — skip it without ending the reach.
       if (target.kind === "bottle" && this.carry?.mesh === target.mesh) continue;
-      return { target, name: this.label(target), distance: h.distance };
+      const cand = { target, name: this.label(target), distance: h.distance };
+      if (!nearest) nearest = cand;
+
+      // Reaching a grabbable at all means everything nearer than it was an open
+      // hinge, because the loop stops below at anything else. So it wins.
+      if (target.kind === "bottle") return cand;
+      // Opaque — a shut leaf, a pump, anything that is not a door standing open.
+      // Nearest-first applies and there is nothing further along worth seeing.
+      if (!this.isOpenHinge(target)) break;
     }
-    return null;
+    return nearest;
+  }
+
+  /**
+   * Whether the ray can reach past this target, i.e. the leaf has physically
+   * swung clear. Deliberately reads `amount` and not `isOpen` — see `pick()`.
+   *
+   * Half open is the threshold because that is when the leaf stops covering
+   * the opening it is set into; below it the player is looking at a door, above
+   * it they are looking through a gap.
+   */
+  private isOpenHinge(t: Target): boolean {
+    if (t.kind === "door") return (this.door?.amount ?? 0) > 0.5;
+    if (t.kind === "cooler") return (this.coolers[t.index]?.amount ?? 0) > 0.5;
+    return false;
   }
 
   private resolve(o: THREE.Object3D | null): Target | null {
@@ -591,6 +879,10 @@ export class InteractionSystem implements GameSystem {
     this.updateDoor(dt);
     this.updateCoolers(dt);
     this.updateCarry(dt);
+    // Last, so the hover is tested against the transforms this frame actually
+    // renders — a door that swung out of the way on this tick must stop
+    // lighting the reticle on this tick and not on the next one.
+    this.updateReticle();
   }
 
   /* ------------------------------------------------------------------ */
@@ -703,13 +995,21 @@ export class InteractionSystem implements GameSystem {
             display,
           }
         : { running: false, nozzleLift: this.lastFuelledFace?.getNozzleLift?.() ?? 0 },
-      coolers: this.coolers.map((h, i) => ({ index: i, amount: h.amount, angle: h.pivot.rotation.y })),
+      // `target` as well as `amount`, because the prompt's verb is derived from
+      // `isOpen`, which reads `target` — a harness checking the wording against
+      // `amount` alone would disagree with a correct prompt for the 0.9 s a
+      // cooler leaf takes to swing.
+      coolers: this.coolers.map((h, i) => ({ index: i, amount: h.amount, target: h.target, angle: h.pivot.rotation.y })),
       bottle: bp ? { carried: !!this.carry, t: this.carry?.t ?? 0, x: bp.x, y: bp.y, z: bp.z } : null,
+      reticle: { ...this.hoverReport(), dom: window.__RETICLE?.() ?? null },
     };
   }
 
   dispose(): void {
     this.ctx?.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
+    window.removeEventListener("keydown", this.onKeyDown);
+    this.reticle?.dispose();
+    this.reticle = null;
     if (window.__INTERACT) delete window.__INTERACT;
   }
 }

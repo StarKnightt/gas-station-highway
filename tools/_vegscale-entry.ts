@@ -20,9 +20,30 @@ export interface PlantSite {
   height: number;
 }
 
+/**
+ * A scrub clump, as published by `vegetation.clumps`.
+ *
+ * Structurally the system's `ScrubSite` minus the tint, restated here rather
+ * than imported so a tool can consume the service without pulling the system's
+ * THREE types in. `size` and `tall` are carried because they are what decides
+ * whether a clump at 90 m subtends a pixel, and a count without them cannot
+ * tell a fringe from a row of specks.
+ */
+export interface ClumpSite {
+  x: number;
+  z: number;
+  kind: string;
+  size: number;
+  tall: number;
+  wide: number;
+}
+
 export async function collectSites(): Promise<{
   sites: PlantSite[];
+  clumps: ClumpSite[];
   ground: (x: number, z: number) => number;
+  scene: THREE.Scene;
+  buildingWas: "real" | "layout-only";
 }> {
   const services = new Map<string, unknown>();
   const game = {
@@ -100,18 +121,44 @@ export async function collectSites(): Promise<{
     shot: null,
   } as never;
 
-  // The building is built for real, not stubbed, because its footprint and
-  // blockers are exclusion masks for plant placement: a wrong rectangle here
-  // moves plants, and moving plants is the thing being measured. `probe-pixel`
-  // stands the same system up the same way.
+  // The building is always stood up for real, because its footprint and its
+  // blocker rectangles are exclusion masks for plant placement: a wrong
+  // rectangle here moves plants, and moving plants is the thing being measured.
+  // `probe-pixel` stands the same system up the same way.
+  //
+  // There used to be a `stubBuilding` option here that supplied the footprint
+  // from a constant and an **empty** blocker list, because `BuildingSystem.init`
+  // rasterised textures through `document.createElement("canvas")` and so could
+  // not be constructed in Node at all. It no longer needs one: `init` takes a
+  // layout-only branch when there is no `document`, which publishes the real
+  // blockers out of `gen/buildingLayout` (pure arithmetic) and marks itself with
+  // `building.headless`. The stub is deleted rather than left switched off —
+  // an empty blocker list does not fail loudly, it quietly plants through the
+  // shelving, and every figure derived from it was wrong in the near field.
   const { BuildingSystem } = await import("../src/systems/BuildingSystem");
-  await new BuildingSystem().init(ctx);
+  new BuildingSystem().init(ctx);
+  const headless = game.tryGet<boolean>("building.headless") === true;
 
   const sys = new VegetationSystem();
   await sys.init(ctx);
 
   const sites = game.tryGet<PlantSite[]>("vegetation.sites") ?? [];
-  return { sites, ground: groundHeight, scene };
+  /*
+   * The scrub clumps, which are a different and much larger population than
+   * `sites`. Every density figure this harness has produced was over the 228
+   * mid-storey plants, while the layer a frame actually reads as at 60 m and out
+   * is the 2429 clumps. Returned separately, and empty rather than absent if the
+   * service is missing, so a caller that forgets to check gets zero rather than
+   * silently falling back to the wrong population.
+   */
+  const clumps = game.tryGet<ClumpSite[]>("vegetation.clumps") ?? [];
+  return {
+    sites,
+    clumps,
+    ground: groundHeight,
+    scene,
+    buildingWas: headless ? "layout-only" : "real",
+  };
 }
 
 export interface WindingReport {

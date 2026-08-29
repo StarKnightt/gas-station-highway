@@ -227,7 +227,7 @@ function deckPath(step = 0.55): THREE.Vector2[] {
  *  - **The batter.** 24 mm of inward lean over 0.70 m. Nothing reads it as
  *    lean; it reads as the band having a consistent falling highlight instead
  *    of one flat value, because the surface normal is no longer exactly
- *    horizontal and this sun is 11 degrees up.
+ *    horizontal and this sun is only 6.2 degrees up.
  *  - **The coping return.** The top rolls inward rather than ending on an
  *    arris, so the silhouette against the sky has a soft top edge and a hard
  *    bottom one, which is the asymmetry a photograph shows.
@@ -692,6 +692,306 @@ export function makeSoffitLampMap(input: SoffitFieldInput, size = 256): THREE.Da
   t.channel = CANOPY.lampMapChannel;
   t.needsUpdate = true;
   return t;
+}
+
+export interface UnderDeckField {
+  /**
+   * Fraction of the sky hemisphere a ground point can still see, 0..1. Purely
+   * geometric — no exposure, no level, no dependence on anyone's light. 1.0 in
+   * the open, about 0.06 under the middle of the deck.
+   */
+  skyVisible(x: number, z: number): number;
+  /**
+   * Irradiance arriving at a ground point from the soffit, normalised so its
+   * maximum over the forecourt is 1.0.
+   *
+   * Proportional to the soffit's own level, which is proportional to
+   * `scene.environmentIntensity`, so a consumer scaling this by its own ambient
+   * gets a term that tracks Lighting without either system compensating for the
+   * other.
+   */
+  soffitBounce(x: number, z: number): number;
+  /**
+   * **The one a consumer should use.** Multiply your ambient/environment term by
+   * this and change nothing else.
+   *
+   * `skyVisible + albedo * (1 - skyVisible) * shape`: the sky a ground point can
+   * still see, plus the part of the intercepted sky the soffit returns. Because
+   * the soffit's albedo is below 1 this can never exceed 1, so the deck cannot
+   * brighten the ground it shades — which a free coefficient between the two
+   * fields absolutely can, and did on the first attempt here at an arbitrary
+   * 0.42.
+   *
+   * **Measured amplitude, so a consumer can decide before spending a round on
+   * it: 0.883 at the drip line, 0.915 mid-bay, 0.942 out on the apron.** A
+   * 6.3% range point to point, and only 0.5% comparing the median under the
+   * deck against the median of the open apron, because most of the "open" part
+   * of the forecourt is within 5 m of the deck edge and sees nearly as much
+   * soffit as the middle does.
+   *
+   * The smallness is the physics rather than a shortfall of effort. A 0.82
+   * albedo soffit returns almost exactly what it intercepts, so occlusion and
+   * the bounce off the occluder cancel — which is precisely why canopies are
+   * painted white, and why a forecourt under one is not gloomy. The one thing
+   * worth having here is the *shape*: the darkest ring is at the perimeter and
+   * it lightens toward mid-bay, an inverse vignette, because at the drip line
+   * you have lost 29% of the sky but can see less of the soffit than you can
+   * from the middle.
+   */
+  ambientScale(x: number, z: number): number;
+  stats: {
+    rect: { minX: number; maxX: number; minZ: number; maxZ: number };
+    skyVisibleAtDeckCentre: number;
+    skyVisibleAtDripLine: number;
+    skyVisibleInOpen: number;
+    /** What `ambientScale` delivers. Under the deck against 1.0 in the open. */
+    ambientAtDeckCentre: number;
+    ambientAtDripLine: number;
+    ambientInOpen: number;
+    bounceMin: number;
+    bounceMean: number;
+    bounceAtDeckCentre: number;
+    bounceAtDripLine: number;
+    /** max/min across the forecourt. The structure this field actually carries. */
+    bounceRange: number;
+    patches: number;
+    samples: number;
+  };
+}
+
+/**
+ * What lights the ground *under* the deck, as two geometric fields a consumer
+ * can scale by its own ambient.
+ *
+ * ## Why this exists, and why the obvious lever does not
+ *
+ * Terrain authored tyre scrub, swing-in ribbons and kerb grime onto the
+ * forecourt. It renders — 71% of near-field pixels move against a forced-off
+ * control — and the contrast delta is **exactly zero**: tonal spread 18.6
+ * against a control's 18.2. The forecourt sits at median luminance 41 with a
+ * tonal spread of 7.3% of range, which was attributed to this deck shadowing the
+ * whole of it. Ray casting says the deck shadows **none** of it and the region is
+ * 89% sunlit; see the report on `canopy.underDeck` in `CanopySystem` and
+ * `tools/probe-shadowsource.mjs`.
+ *
+ * The request that arrived was to raise "soffit bounce", which this system
+ * already exposes. **That lever does not connect, and the reason is worth
+ * stating plainly: a `lightMap` and an `emissiveMap` are receiver-side terms.**
+ * They change the pixels of the surface that carries them and illuminate
+ * nothing else, because `WebGLRenderer` has no light transport between
+ * surfaces. `setLampBounce(2)` would make the soffit brighter and move the
+ * forecourt by exactly zero levels. Turning that knob and re-measuring would
+ * have produced a null result indistinguishable from a measurement error.
+ *
+ * ## The actual diagnosis is structural, not a shortage of light
+ *
+ * Under the deck the sun is blocked, so the only term lighting the ground is
+ * the environment — and Lighting's lower hemisphere is **one constant colour**,
+ * `(0.115, 0.062, 0.030)`, standing in for warm bounce off the sunlit lot.
+ *
+ * > A spatially constant term cannot produce spatial variation. The forecourt
+ * > is not flat because it is dark; it is flat because the only term lighting it
+ * > is a constant, and no amount of raising a constant introduces structure.
+ *
+ * That is the same shape as this system's own soffit episode — where more of a
+ * quantity did not help because the mechanism was wrong — and it means raising
+ * the environment makes the region *lighter and equally flat*, which is the
+ * "flat and milky instead of flat and dark" outcome to avoid. What the region
+ * needs is a term that varies across it.
+ *
+ * ## The two fields, and why they are geometric
+ *
+ * `skyVisible` is the exact solid angle of the deck subtracted from the
+ * hemisphere. The renderer currently applies the environment under the deck
+ * **unoccluded**, which is both too much light and — the part that matters —
+ * perfectly uniform. Multiplying the ambient by this turns one constant into a
+ * gradient that is strong near the drip line and deep under the middle.
+ *
+ * `soffitBounce` is the second bounce, integrated from this system's own baked
+ * soffit exitance with the form factor between two parallel horizontal
+ * surfaces, `h^2 / (pi r^4) dA`. It is the physically real path the request was
+ * reaching for — sun to sunlit apron to soffit to ground — and it has to be
+ * computed here because this system owns both the occluder and the bake. Note
+ * that a *coplanar* sunlit apron contributes almost nothing to the forecourt
+ * directly, since two surfaces in the same plane are edge-on to each other;
+ * the apron's light reaches the forecourt only by way of the soffit, which is
+ * exactly why the soffit is the surface that was worth baking.
+ *
+ * Both are published as shapes with no level baked in, so the consumer's own
+ * ambient sets the magnitude and two systems cannot both scale the same region.
+ *
+ * Second-order occlusion by the pump islands and dispensers along the
+ * soffit-to-ground path is **not** modelled, because that is other systems'
+ * geometry and guessing at it here would put a term in this field that its
+ * owner could not correct.
+ */
+export function makeUnderDeckField(
+  input: SoffitFieldInput,
+  soffitY: number,
+  groundY: (x: number, z: number) => number,
+  rect: { minX: number; maxX: number; minZ: number; maxZ: number },
+  opts: { patches?: number; spacing?: number } = {}
+): UnderDeckField {
+  const P = opts.patches ?? 20;
+  const spacing = opts.spacing ?? 0.2;
+
+  /*
+   * Exact solid angle of an axis-aligned rectangle at height h, seen from the
+   * origin, by the signed four-corner decomposition. `atan` is odd, so the
+   * signs of the corner coordinates carry through and the same expression is
+   * correct whether the point is under the rectangle or outside it — which
+   * matters, because the forecourt extends past the deck on every side and a
+   * formula only valid underneath would silently mis-handle the apron.
+   */
+  const cornerTerm = (a: number, b: number, h: number) =>
+    Math.atan2(a * b, h * Math.sqrt(a * a + b * b + h * h));
+  const deckSolidAngle = (x: number, z: number, h: number) => {
+    const x0 = CANOPY.minX - x;
+    const x1 = CANOPY.maxX - x;
+    const z0 = CANOPY.minZ - z;
+    const z1 = CANOPY.maxZ - z;
+    return (
+      cornerTerm(x1, z1, h) - cornerTerm(x0, z1, h) - cornerTerm(x1, z0, h) + cornerTerm(x0, z0, h)
+    );
+  };
+  const skyVisible = (x: number, z: number) => {
+    const h = soffitY - groundY(x, z);
+    if (!(h > 0)) return 1;
+    const omega = Math.abs(deckSolidAngle(x, z, h));
+    const v = 1 - omega / (2 * Math.PI);
+    return v < 0 ? 0 : v > 1 ? 1 : v;
+  };
+
+  /*
+   * The soffit as a grid of emitting patches. Exitance is the sky bake times
+   * the soffit's albedo, plus the lamp map, which is the same pair of terms the
+   * soffit material carries and in the same proportion — so if either is
+   * re-levelled, this field moves with it instead of drifting out of step.
+   */
+  const skyTex = makeSoffitLightmap(input);
+  const lampTex = makeSoffitLampMap(input);
+  const N = CANOPY.lightmapSize;
+  const L = lampTex.image.width;
+  const SOFFIT_ALBEDO = 0.82;
+  const skyData = skyTex.image.data as Uint8Array | null;
+  const lampData = lampTex.image.data as Uint8Array | null;
+  if (!skyData || !lampData) {
+    throw new Error("canopy: soffit bakes returned no pixel data; the under-deck field has nothing to integrate");
+  }
+  const patch: { x: number; z: number; m: number }[] = [];
+  const dA = ((CANOPY.maxX - CANOPY.minX) / P) * ((CANOPY.maxZ - CANOPY.minZ) / P);
+  for (let j = 0; j < P; j++) {
+    const z = CANOPY.minZ + ((CANOPY.maxZ - CANOPY.minZ) * (j + 0.5)) / P;
+    for (let i = 0; i < P; i++) {
+      const x = CANOPY.minX + ((CANOPY.maxX - CANOPY.minX) * (i + 0.5)) / P;
+      const u = (x - CANOPY.minX) / (CANOPY.maxX - CANOPY.minX);
+      const v = (z - CANOPY.minZ) / (CANOPY.maxZ - CANOPY.minZ);
+      const si = Math.min(N - 1, Math.floor(u * N));
+      const sj = Math.min(N - 1, Math.floor(v * N));
+      const li = Math.min(L - 1, Math.floor(u * L));
+      const lj = Math.min(L - 1, Math.floor(v * L));
+      const sky = skyData[(sj * N + si) * 4] / 255;
+      const lamp = lampData[(lj * L + li) * 4] / 255;
+      patch.push({ x, z, m: sky * SOFFIT_ALBEDO + lamp });
+    }
+  }
+  skyTex.dispose();
+  lampTex.dispose();
+
+  const nx = Math.max(2, Math.ceil((rect.maxX - rect.minX) / spacing));
+  const nz = Math.max(2, Math.ceil((rect.maxZ - rect.minZ) / spacing));
+  const grid = new Float32Array((nx + 1) * (nz + 1));
+  const rawAt = (x: number, z: number) => {
+    const h = soffitY - groundY(x, z);
+    if (!(h > 0)) return 0;
+    const h2 = h * h;
+    let e = 0;
+    for (const p of patch) {
+      const dx = x - p.x;
+      const dz = z - p.z;
+      const r2 = h2 + dx * dx + dz * dz;
+      e += (p.m * h2) / (Math.PI * r2 * r2);
+    }
+    return e * dA;
+  };
+  let peak = 0;
+  for (let j = 0; j <= nz; j++) {
+    const z = rect.minZ + ((rect.maxZ - rect.minZ) * j) / nz;
+    for (let i = 0; i <= nx; i++) {
+      const x = rect.minX + ((rect.maxX - rect.minX) * i) / nx;
+      const e = rawAt(x, z);
+      grid[j * (nx + 1) + i] = e;
+      if (e > peak) peak = e;
+    }
+  }
+  if (!(peak > 0) || !Number.isFinite(peak)) {
+    throw new Error(`canopy: under-deck bounce field peaked at ${peak}; refusing to publish a dead field`);
+  }
+  for (let k = 0; k < grid.length; k++) grid[k] /= peak;
+
+  const soffitBounce = (x: number, z: number) => {
+    const u = ((x - rect.minX) / (rect.maxX - rect.minX)) * nx;
+    const v = ((z - rect.minZ) / (rect.maxZ - rect.minZ)) * nz;
+    if (!Number.isFinite(u) || !Number.isFinite(v)) return 0;
+    const i0 = Math.max(0, Math.min(nx - 1, Math.floor(u)));
+    const j0 = Math.max(0, Math.min(nz - 1, Math.floor(v)));
+    const fu = Math.max(0, Math.min(1, u - i0));
+    const fv = Math.max(0, Math.min(1, v - j0));
+    const g = (i: number, j: number) => grid[j * (nx + 1) + i];
+    return (
+      g(i0, j0) * (1 - fu) * (1 - fv) +
+      g(i0 + 1, j0) * fu * (1 - fv) +
+      g(i0, j0 + 1) * (1 - fu) * fv +
+      g(i0 + 1, j0 + 1) * fu * fv
+    );
+  };
+
+  const cx = (CANOPY.minX + CANOPY.maxX) / 2;
+  const cz = (CANOPY.minZ + CANOPY.maxZ) / 2;
+  // Just inside the drip line on the road-facing edge: the ground a viewer on
+  // the apron is actually looking at.
+  const dripX = cx;
+  const dripZ = CANOPY.minZ + 0.3;
+  let bMin = Infinity;
+  let bSum = 0;
+  let bMax = 0;
+  let n = 0;
+  for (let j = 0; j <= nz; j++) {
+    for (let i = 0; i <= nx; i++) {
+      const g = grid[j * (nx + 1) + i];
+      bMin = Math.min(bMin, g);
+      bMax = Math.max(bMax, g);
+      bSum += g;
+      n++;
+    }
+  }
+
+  const ambientScale = (x: number, z: number) => {
+    const s = skyVisible(x, z);
+    return s + SOFFIT_ALBEDO * (1 - s) * soffitBounce(x, z);
+  };
+
+  return {
+    skyVisible,
+    soffitBounce,
+    ambientScale,
+    stats: {
+      rect,
+      ambientAtDeckCentre: +ambientScale(cx, cz).toFixed(4),
+      ambientAtDripLine: +ambientScale(dripX, dripZ).toFixed(4),
+      ambientInOpen: +ambientScale(rect.minX + 0.2, rect.minZ + 0.2).toFixed(4),
+      skyVisibleAtDeckCentre: +skyVisible(cx, cz).toFixed(4),
+      skyVisibleAtDripLine: +skyVisible(dripX, dripZ).toFixed(4),
+      skyVisibleInOpen: +skyVisible(rect.minX + 0.2, rect.minZ + 0.2).toFixed(4),
+      bounceMin: +bMin.toFixed(4),
+      bounceMean: +(bSum / n).toFixed(4),
+      bounceAtDeckCentre: +soffitBounce(cx, cz).toFixed(4),
+      bounceAtDripLine: +soffitBounce(dripX, dripZ).toFixed(4),
+      bounceRange: +(bMax / Math.max(1e-6, bMin)).toFixed(2),
+      patches: patch.length,
+      samples: (nx + 1) * (nz + 1),
+    },
+  };
 }
 
 /**

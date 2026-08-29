@@ -215,6 +215,27 @@ function lowerPriority() {
 const SHADER_FAIL = /program info log|shader error|gl\.getShaderInfoLog|undeclared identifier|VALIDATE_STATUS/i;
 
 /**
+ * A `Program Info Log` that carries only HLSL/GLSL *warnings* and no error.
+ *
+ * `SHADER_FAIL` matches the words "program info log", which is right, because
+ * three prints that header for both warnings and errors and a round must never
+ * continue past an error. But the D3D compiler behind ANGLE also emits advisory
+ * warnings, and the first one this project ever saw — `X4122: sum of 0.996094
+ * and -2.98545e-017 cannot be represented accurately in double precision`, from
+ * constant folding in the spot-shadow program — failed a round whose five
+ * screenshots had all rendered correctly.
+ *
+ * The tightening is deliberately narrow, and inverted: rather than listing
+ * warnings to forgive, require that the log contain *no* error-shaped token at
+ * all. A log with both a warning and an error still fails. Widening
+ * `SHADER_FAIL` instead is the mistake that already cost this project a round in
+ * the other direction, when the pattern was loose enough to hide a real failing
+ * line.
+ */
+const SHADER_WARN_ONLY = (text) =>
+  /program info log/i.test(text) && /\bwarning\b/i.test(text) && !/\berror\b|ERROR:|undeclared identifier|VALIDATE_STATUS/i.test(text);
+
+/**
  * Newest mtime and a content hash of the private build dir, so a stale bundle
  * cannot be mistaken for a fresh one and every archived round names the build
  * that produced it (NOTES.md case 13).
@@ -341,7 +362,15 @@ async function main() {
     const page = await context.newPage();
     const problems = [];
     page.on("console", (m) => {
-      if (m.type() === "error" || SHADER_FAIL.test(m.text())) problems.push(`console: ${m.text()}`);
+      const t = m.text();
+      if (SHADER_WARN_ONLY(t)) {
+        // Surfaced, never fatal, and never silently dropped: a warning that
+        // appears the round a shader changes is worth reading even when it is
+        // benign.
+        console.warn(`[shoot4]   shader warning (not fatal): ${t.slice(0, 200)}`);
+      } else if (m.type() === "error" || SHADER_FAIL.test(t)) {
+        problems.push(`console: ${t}`);
+      }
     });
     page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
 

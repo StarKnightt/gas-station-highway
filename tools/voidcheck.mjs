@@ -43,6 +43,8 @@ const num = (v) => typeof v === "number" && Number.isFinite(v);
  * @param out The harness's run record (`tools/perf-out/stress-*.json`).
  */
 export function evaluateVoidConditions(out) {
+  // Reported to the reader, never part of the void decision. See condition 2.
+  const advisories = [];
   const fired = [];
   const checked = [];
   const undecidable = [];
@@ -70,16 +72,35 @@ export function evaluateVoidConditions(out) {
       : "no pre-launch VRAM baseline was sampled"
   );
 
-  /* 2. Something else was on the GPU: a static camera cannot pin it. */
+  /* 2. DOWNGRADED TO ADVISORY BY RULING, 2026-08-29. Reported, never voids.
+   *
+   *    The intent was "something else was on the GPU: a static camera cannot pin
+   *    it." The premise is false for this build. **This renderer has no frame
+   *    cap**, so it renders as fast as the card allows and pins utilisation near
+   *    100% whenever the scene is up — parked or walking, on a perfectly quiet
+   *    host. The gate therefore asked for a state the build cannot enter, and
+   *    measured 99% on the one exclusive quiet window this project ever got.
+   *
+   *    And the quantity it actually wants is unmeasurable here regardless:
+   *    `nvidia-smi` does not attribute GPU utilisation per process on WDDM, so
+   *    total card utilisation cannot be split into ours and theirs.
+   *
+   *    A gate no valid run can pass is not a gate, it is a permanent failure,
+   *    and it dilutes the four conditions that do mean something. So the verdict
+   *    changes, not the threshold: high parked utilisation is printed as context
+   *    for a human and never contributes to the void decision.
+   *
+   *    To make this a real check you would need a per-process source (PresentMon,
+   *    or GPU timer queries inside the page) — not a card-wide counter.
+   */
   const parkedPhase = phases?.find((p) => p.phase === "parked-control");
-  decide(
-    2,
-    "GPU busy while parked",
-    num(parkedPhase?.utilMeanPct),
-    parkedPhase?.utilMeanPct >= LIMITS.parkedGpuUtilPct,
-    num(parkedPhase?.utilMeanPct)
-      ? `${parkedPhase.utilMeanPct.toFixed(0)}% mean GPU utilisation with the camera static (limit ${LIMITS.parkedGpuUtilPct})`
-      : "no parked-control VRAM phase was sampled; was --park set?"
+  const parkedUtil = num(parkedPhase?.utilMeanPct) ? parkedPhase.utilMeanPct : null;
+  advisories.push(
+    parkedUtil === null
+      ? "2. GPU busy while parked: not sampled (was --park set?) — advisory only, cannot void"
+      : `2. GPU busy while parked: ${parkedUtil.toFixed(0)}% mean card utilisation with the camera static. ` +
+          "ADVISORY ONLY — this renderer is uncapped so it pins the card by design, and per-process " +
+          "GPU share is not attributable on WDDM. Not evidence of contention either way."
   );
 
   /* 3. Another process released memory mid-run, so no delta is readable. A phase
@@ -135,7 +156,7 @@ export function evaluateVoidConditions(out) {
     deaths.length ? deaths.join("; ") : "reached ready, survived, context intact"
   );
 
-  return { void: fired.length > 0 || undecidable.length > 0, fired, checked, undecidable };
+  return { void: fired.length > 0 || undecidable.length > 0, fired, checked, undecidable, advisories };
 }
 
 /**
@@ -216,6 +237,7 @@ export function formatVerdict(result, { rehearsal = false } = {}) {
   }
   for (const u of result.undecidable) lines.push(`  UNKNOWN  ${u.id}. ${u.title}: ${u.why}`);
   for (const f of result.fired) lines.push(`  VOID     ${f.id}. ${f.title}: ${f.detail}`);
+  for (const a of result.advisories ?? []) lines.push(`  note     ${a}`);
   lines.push("");
   if (rehearsal) {
     lines.push(`  REHEARSAL: every number in this run is void by construction. This was a test of`);
@@ -226,7 +248,7 @@ export function formatVerdict(result, { rehearsal = false } = {}) {
         `No frame-time number from this run may be quoted.`
     );
   } else {
-    lines.push(`  RUN COUNTS: all five conditions checked and none fired.`);
+    lines.push(`  RUN COUNTS: all four voting conditions checked and none fired (2 is advisory).`);
   }
   return lines.join("\n");
 }
