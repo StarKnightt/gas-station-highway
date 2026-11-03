@@ -176,5 +176,3 @@ Three.js 0.185 · TypeScript · Vite · Playwright for capture · ffmpeg for enc
 ## Licence
 
 MIT
-
-☕ like it? [buy me a coffee](https://buymeacoffee.com/prasenx) or [sponsor on github](https://github.com/sponsors/StarKnightt)
